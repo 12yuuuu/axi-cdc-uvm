@@ -1,0 +1,15 @@
+# simulator output
+logs/
+xcelium.d/
+cov_work/
+*.history
+xrun.log
+*.shm
+*.vcd
+*.tgz
+*.tar
+__pycache__/
+# private work log and old stage scripts (not pushed)
+notes/
+tb/upstream/
+.DS_Store

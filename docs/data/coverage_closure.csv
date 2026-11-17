@@ -1,0 +1,5 @@
+config,Random (rand_test),+ coverage-driven random (rand_cov_test),"+ targeted random, directed (final)",total,note
+All runs merged,128,134,135,135,merged view hides the LogDepth 4/6 holes
+LogDepth 2,128,134,135,135,
+LogDepth 4,104,117,132,135,"AW, AR, B FIFOs never full"
+LogDepth 6,103,112,132,135,"AW, AR, B FIFOs never full"
