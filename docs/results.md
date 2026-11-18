@@ -3,12 +3,14 @@
 - **Mode:** full
 - **Simulator:** Cadence Xcelium 23.09-s006, UVM 1.2 (CDNS-1.2)
 - **Host:** EECG ug136 (Debian 12), University of Toronto
-- **Date:** 2026-11-17 19:54 EST
+- **Date:** 2026-11-17 23:15 EST
 - **Wall time:** 4 min 18 s (one machine, runs in sequence)
 
 **Verdict: SIGNED OFF**
 
 269 runs, 269 passed; 59,761 writes (814,861 beats) and 107,195 reads checked; 1,565,019 read beats matched the reference model; 128,746 error responses checked; 0 assertion fires; 5 negative tests, 5 caught.
+
+Plan: 269 runs and 5 negative tests in the manifest, 274 of 274 with a result; 48 planned trace pairs. Simulator exit status (count): 1 (274); a non-zero status is accepted only when the log has the known `*E,IMPDLL`, no other error except assertion failures (judged by the verdict), and the run reached `$finish`.
 
 ## Runs
 
@@ -33,9 +35,9 @@ Each fault is injected on purpose; the run must fail, caught by the checker it i
 | `neg_ptr_glitch` | 2 bits of a crossing gray pointer flipped for one cycle | CDC SVA only | CAUGHT | 0 | 9 |
 | `neg_slave_wrap` | slave model forgets to wrap WRAP bursts | reference model only | CAUGHT | 158 | 0 |
 
-## Same seed, both DUTs
+## Trace comparison, same seed on both DUTs
 
-48 pairs of runs (`axi_cdc_ram` vs. `axi_cdc`, same test and seed): 48 with the same transactions (every field, data and response, compared as a set); 8 also in the same order.
+48 pairs of runs (`axi_cdc_ram` vs. `axi_cdc`, same test and seed): 48 with the same transactions, compared as a multiset of trace lines (every request field, a 64-bit hash of data, strobes and user bits, and a hash of the responses); 8 also in the same order. This is regression evidence, not a formal equivalence proof.
 
 ## FIFO full, per configuration
 

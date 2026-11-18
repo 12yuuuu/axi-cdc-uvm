@@ -5,16 +5,23 @@
 
     python3 tools/report.py SUMMARY.csv COVERAGE.csv -o results.md \\
         --goals tb/uvm/coverage_goals.txt --logs logs/regress \\
+        --manifest logs/regress/manifest.csv \\
         --configs ram_d1,ram_d2,ram_d4,ram_d6,orig_d2 \\
         --neg neg_rdata,neg_bresp,neg_aw_unstable,neg_ptr_glitch,neg_slave_wrap \\
         [--traces trace_compare.csv] [--mode full|quick] [--meta KEY=VALUE ...]
 
 Inputs: SUMMARY.csv has one row per run (sim/common.sh run_case; negative
 tests have set "neg" and result CAUGHT or MISSED). COVERAGE.csv comes from
-tools/merge_cov.py (hits of every bin per configuration, plus "all").
+tools/merge_cov.py (hits of every bin per configuration, plus "all"). The
+manifest is the plan that sim/regress.sh writes before it starts any run:
+every run and negative test, with test, seed, configuration and whether the
+run writes a trace.
 
 Sign-off (docs/vplan.md, section 5). Anything missing counts as a failure,
 never as a pass:
+  * every planned run and negative test has exactly one result, with the
+    planned test, seed and configuration, and there is no unplanned result;
+  * every result has an accepted simulator exit status (exit_ok = 1);
   * every required negative test is present and CAUGHT;
   * every other run is PASS, with 0 assertion fires;
   * every run's log lists exactly the bins of the goal file, and so does
@@ -22,8 +29,8 @@ never as a pass:
   * every required configuration has runs and a coverage column;
   * full mode: every bin is hit over all runs, and every configuration hits
     all of its txn, flow and order bins;
-  * with --traces: at least one pair, and every pair has the same
-    transactions on both DUTs.
+  * every trace pair in the plan was compared, no other pair, and every
+    pair has the same transactions on both DUTs.
 Quick mode skips the two coverage-completeness rules (too few runs).
 Exit code 0 only if signed off. tools/test_report.py tests these rules.
 """
@@ -168,10 +175,57 @@ def check(a):
         for p in pairs:
             if p.get("same_transactions") != "1":
                 problems.append(f"traces differ: {p.get('ram')} vs {p.get('orig')}")
-    return problems, rows, neg, runs, cov, cols, pairs, goals, hit
+
+    # the plan: every planned result present, nothing else, traces as planned
+    plan = list(csv.DictReader(open(a.manifest))) if os.path.exists(a.manifest) else []
+    if not plan:
+        problems.append("run manifest is missing or empty")
+    keys = ("set", "test", "seed", "use_ram", "log_depth")
+    by_name = {}
+    for r in rows:
+        by_name.setdefault(r.get("name"), []).append(r)
+    planned = {p["name"]: p for p in plan}
+    missing = [n for n in planned if n not in by_name]
+    extra = [n for n in by_name if n not in planned]
+    twice = [n for n, rr in by_name.items() if len(rr) > 1]
+    differ = [n for n, p in planned.items() if n in by_name
+              and any(str(by_name[n][0].get(k)) != str(p.get(k)) for k in keys)]
+    for what, names in (("planned runs have no result", missing), ("results are not in the plan", extra),
+                        ("results appear more than once", twice), ("results do not match the plan", differ)):
+        if names:
+            problems.append(f"{len(names)} {what} (e.g. {', '.join(sorted(names)[:3])})")
+    if rows and "exit_ok" not in rows[0]:
+        problems.append("summary has no simulator exit status")
+    else:
+        bad_exit = [r["name"] for r in rows if r.get("exit_ok") != "1"]
+        if bad_exit:
+            problems.append(f"{len(bad_exit)} runs with a simulator exit status that is not accepted "
+                            f"(e.g. {', '.join(sorted(bad_exit)[:3])})")
+    want = set()
+    for n, p in planned.items():
+        if p.get("trace") == "1" and "_ram_d2_" in n:
+            twin = n.replace("_ram_d2_", "_orig_d2_", 1)
+            if planned.get(twin, {}).get("trace") != "1":
+                problems.append(f"plan: trace run {n} has no twin")
+            want.add((n, twin))
+    for n, p in planned.items():
+        if p.get("trace") == "1" and "_orig_d2_" in n and (n.replace("_orig_d2_", "_ram_d2_", 1), n) not in want:
+            problems.append(f"plan: trace run {n} has no twin")
+    got = {(p.get("ram"), p.get("orig")) for p in pairs}
+    if want and a.traces is None:
+        problems.append("the plan has trace pairs but no trace comparison was given")
+    elif want:
+        lost = want - got
+        if lost:
+            problems.append(f"{len(lost)} planned trace pairs were not compared "
+                            f"(e.g. {', '.join(sorted(r for r, _ in lost)[:3])})")
+        if got - want:
+            problems.append(f"{len(got - want)} trace pairs are not in the plan")
+    plan_info = (len(plan), sum(p.get("set") == "neg" for p in plan), len(missing), len(want))
+    return problems, rows, neg, runs, cov, cols, pairs, goals, hit, plan_info
 
 
-def page(a, problems, rows, neg, runs, cov, cols, pairs, goals, hit):
+def page(a, problems, rows, neg, runs, cov, cols, pairs, goals, hit, plan_info):
     ok = not problems
     L = ["# Regression results", ""]
     for m in a.meta:
@@ -191,6 +245,16 @@ def page(a, problems, rows, neg, runs, cov, cols, pairs, goals, hit):
           f"reference model; {te:,} error responses checked; "
           f"{sum(num(r.get('sva_errors')) for r in runs)} assertion fires; "
           f"{len(neg)} negative tests, {sum(r.get('result') == 'CAUGHT' for r in neg)} caught.", ""]
+    n_plan, n_pneg, n_missing, n_pairs = plan_info
+    codes = {}
+    for r in rows:
+        codes[r.get("exit_code", "?")] = codes.get(r.get("exit_code", "?"), 0) + 1
+    code_txt = ", ".join(f"{c} ({n})" for c, n in sorted(codes.items()))
+    L += [f"Plan: {n_plan - n_pneg} runs and {n_pneg} negative tests in the manifest, "
+          f"{n_plan - n_missing} of {n_plan} with a result; {n_pairs} planned trace pairs. "
+          f"Simulator exit status (count): {code_txt}; a non-zero status is accepted only when the "
+          "log has the known `*E,IMPDLL`, no other error except assertion failures (judged by the "
+          "verdict), and the run reached `$finish`.", ""]
 
     L += ["## Runs", "",
           "| Set | Runs | Passed | Writes | Write beats | Reads | Read beats checked | Error responses | Longest run (simulated) |",
@@ -217,10 +281,12 @@ def page(a, problems, rows, neg, runs, cov, cols, pairs, goals, hit):
 
     if pairs:
         same = sum(p.get("same_transactions") == "1" for p in pairs)
-        L += ["## Same seed, both DUTs", "",
+        L += ["## Trace comparison, same seed on both DUTs", "",
               f"{len(pairs)} pairs of runs (`axi_cdc_ram` vs. `axi_cdc`, same test and seed): "
-              f"{same} with the same transactions (every field, data and response, compared as a set); "
-              f"{sum(p.get('same_order') == '1' for p in pairs)} also in the same order.", ""]
+              f"{same} with the same transactions, compared as a multiset of trace lines (every "
+              "request field, a 64-bit hash of data, strobes and user bits, and a hash of the "
+              f"responses); {sum(p.get('same_order') == '1' for p in pairs)} also in the same order. "
+              "This is regression evidence, not a formal equivalence proof.", ""]
 
     configs = sorted({config_of(r) for r in runs}, key=lambda c: (c.startswith("orig"), c))
     L += ["## FIFO full, per configuration", "",
@@ -261,6 +327,7 @@ def main(argv=None):
     ap.add_argument("--logs", required=True)
     ap.add_argument("--configs", required=True, type=lambda s: [x for x in s.split(",") if x])
     ap.add_argument("--neg", required=True, type=lambda s: [x for x in s.split(",") if x])
+    ap.add_argument("--manifest", required=True)
     ap.add_argument("--traces")
     ap.add_argument("--mode", choices=["full", "quick"], default="full")
     ap.add_argument("--meta", action="append", default=[])

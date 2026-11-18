@@ -3,15 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Figures for the README, in one paper-like style (muted palette, serif text).
 
-    python3 tools/figures.py [--dark] arch     docs/fig1_testbench.svg
-    python3 tools/figures.py [--dark] wave     docs/fig2_waveform.svg waves.vcd 340 445
-    python3 tools/figures.py [--dark] coverage docs/fig3_coverage_closure.svg docs/data/coverage_closure.csv
+    python3 tools/figures.py arch     docs/fig1_testbench.svg
+    python3 tools/figures.py wave     docs/fig2_waveform.svg waves.vcd 340 445
+    python3 tools/figures.py coverage docs/fig3_coverage_closure.svg docs/data/coverage_closure.csv
 
 wave: a VCD of tb_top, e.g. from `sim/run_one.sh smoke_test 1 1 2 +VCD`, and a
 time window in ns around one write.
-The background is transparent. --dark draws light ink for a dark page (the
-README picks the version with prefers-color-scheme); the default is for a
-white page. The output format follows the file extension (.svg, .pdf, .png).
+The figures are transparent and use one set of colors that reads on a white
+page and on a dark page (GitHub light and dark themes): every text and line
+color has at least 3.5:1 contrast on #ffffff and on #0d1117, and fills are
+translucent washes of the line color. The output format follows the file
+extension (.svg, .pdf, .png).
 """
 import csv
 import sys
@@ -21,45 +23,33 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 
-# Muted palette. The pair passes the dataviz palette checks on white
-# (lightness band, chroma floor, CVD and normal-vision separation, 3:1
-# contrast); the stage ramp passes the ordinal checks.
-# SURF is the page the figure sits on (the files themselves are transparent):
-# box fills, washes and marker rings are drawn in it.
-THEMES = {
-    "light": dict(INK="#222222", INK2="#5a5a5a", GRID="#e3e3e3", SURF="#ffffff", DUT="#f3f3f3", RULE="#c9c9c9",
-                  STAGE=["#A39DD2", "#6E64B0", "#3B2F8C"]),     # closure steps, light -> dark
-    # GitHub dark page; same hues, the stage ramp runs dim -> bright (passes
-    # the ordinal checks on #0d1117; SRC/DST pass the categorical checks)
-    "dark": dict(INK="#e6edf3", INK2="#9198a1", GRID="#2d333b", SURF="#0d1117", DUT="#161b22", RULE="#444c56",
-                 STAGE=["#5A4FA8", "#8C84CC", "#C3BEEA"]),
-}
-SRC, DST = "#6E64B0", "#CC6677"               # source / destination clock domain
-INK = INK2 = GRID = SURF = DUT = RULE = None
-STAGE = []
+# One palette for light and dark pages. Contrast (WCAG) on #ffffff / #0d1117:
+#   INK #7d8590 3.7 / 5.1 (all text and lines)
+#   SRC #7B71C0 4.2 / 4.5, DST #CC6677 3.7 / 5.2 (pass the dataviz categorical
+#   checks in light and dark mode)
+# Fills are the same colors at low alpha, so they follow the page color.
+INK = INK2 = "#7d8590"
+SRC, DST = "#7B71C0", "#CC6677"               # source / destination clock domain
+GRID = (0.49, 0.52, 0.56, 0.22)
+RULE = (0.49, 0.52, 0.56, 0.55)
+NONE = "none"
 MONO = "DejaVu Sans Mono"
 # no date or tool version in the files, so a rebuild without changes is byte-identical
 META = {"svg": {"Date": None, "Creator": None}, "pdf": {"CreationDate": None, "Creator": None, "Producer": None}}
 
+plt.rcParams.update({
+    "font.family": "STIXGeneral", "mathtext.fontset": "stix", "font.size": 9,
+    "axes.linewidth": 0.6, "axes.edgecolor": INK, "svg.fonttype": "path",
+    "xtick.major.width": 0.6, "ytick.major.width": 0.6, "xtick.color": INK,
+    "ytick.color": INK, "axes.labelcolor": INK, "text.color": INK, "savefig.dpi": 220,
+    "svg.hashsalt": "axi_cdc_uvm",
+})
 
 
-def use_theme(name):
-    globals().update(THEMES[name])
-    plt.rcParams.update({
-        "font.family": "STIXGeneral", "mathtext.fontset": "stix", "font.size": 9,
-        "axes.linewidth": 0.6, "axes.edgecolor": INK2, "svg.fonttype": "path",
-        "xtick.major.width": 0.6, "ytick.major.width": 0.6, "xtick.color": INK2,
-        "ytick.color": INK2, "axes.labelcolor": INK, "text.color": INK, "savefig.dpi": 220,
-        "svg.hashsalt": "axi_cdc_uvm",
-    })
-
-
-def tint(hex_color, a):
-    """Blend a color with the page (a = share of the color)."""
-    h, p = hex_color.lstrip("#"), SURF.lstrip("#")
-    rgb = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
-    page = [int(p[i:i + 2], 16) for i in (0, 2, 4)]
-    return "#%02x%02x%02x" % tuple(round(q + (c - q) * a) for c, q in zip(rgb, page))
+def wash(hex_color, a):
+    """The color at alpha a: a tint on a white page, a shade on a dark one."""
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)) + (a,)
 
 
 def save(fig, out):
@@ -75,7 +65,7 @@ def arch(out):
 
     def box(x, y, w, h, title, sub=None, mono=False, ty=None):
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=1.2",
-                                    fc=SURF, ec=INK2, lw=0.7, zorder=2))
+                                    fc=NONE, ec=INK, lw=0.7, zorder=2))
         ty = ty if ty is not None else (y + h * 0.64 if sub else y + h / 2)
         ax.text(x + w / 2, ty, title, ha="center", va="center", fontsize=8.5,
                 family=MONO if mono else "STIXGeneral", zorder=3)
@@ -89,13 +79,13 @@ def arch(out):
 
     def tag(x, y, w, h, text):
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=0.8",
-                                    fc=SURF, ec=INK, lw=0.6, ls=(0, (2, 1.5)), zorder=5))
+                                    fc=NONE, ec=INK, lw=0.6, ls=(0, (2, 1.5)), zorder=5))
         ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=6.3, zorder=6,
                 linespacing=1.15)
 
     # clock-domain panels (identity: colored rule + 10 % wash; text stays ink)
     for x0, x1, col, name, ha in ((1, 34, SRC, "src_clk domain", "left"), (66, 99, DST, "dst_clk domain", "right")):
-        ax.add_patch(Rectangle((x0, 3), x1 - x0, 56, fc=tint(col, 0.10), ec="none", zorder=0))
+        ax.add_patch(Rectangle((x0, 3), x1 - x0, 56, fc=wash(col, 0.10), ec="none", zorder=0))
         ax.plot([x0, x1], [59, 59], color=col, lw=2.4, solid_capstyle="butt")
         ax.text(x0 + 1 if ha == "left" else x1 - 1, 56.6, name, ha=ha, fontsize=8, style="italic")
 
@@ -118,14 +108,14 @@ def arch(out):
 
     # DUT
     ax.add_patch(FancyBboxPatch((38, 16.5), 24, 28, boxstyle="round,pad=0,rounding_size=1.2",
-                                fc=DUT, ec=INK, lw=0.9, zorder=1))
+                                fc=wash(INK, 0.10), ec=INK, lw=0.9, zorder=1))
     ax.text(50, 42.0, "axi_cdc_ram", ha="center", va="center", fontsize=8.5, family=MONO, zorder=3)
     ax.text(50, 39.6, "DUT (baseline: axi_cdc)", ha="center", va="center", fontsize=6.8, color=INK2, zorder=3)
     ax.plot([50, 50], [20.5, 37.5], color=INK2, lw=0.6, ls=(0, (3, 2)), zorder=2)
     lanes = (("AW", 36.0, 1), ("W", 32.5, 1), ("AR", 29.0, 1), ("B", 25.5, -1), ("R", 22.0, -1))
     for name, y, d in lanes:
         for i in range(4):
-            ax.add_patch(Rectangle((46.6 + 1.7 * i, y - 1.0), 1.5, 2.0, fc=SURF, ec=INK2, lw=0.5, zorder=3))
+            ax.add_patch(Rectangle((46.6 + 1.7 * i, y - 1.0), 1.5, 2.0, fc=NONE, ec=INK, lw=0.5, zorder=3))
         if d > 0:
             arrow((31, y), (46.4, y))
             arrow((53.6, y), (69, y))
@@ -219,7 +209,7 @@ def wave(out, vcd_path, t0, t1):
         clk = "clk" in label
         if gate is None:
             if not clk:
-                ax.fill_between(xs, base, [base + H * q for q in ys], color=color, alpha=0.12, lw=0)
+                ax.fill_between(xs, base, [base + H * q for q in ys], color=color, alpha=0.18, lw=0)
             ax.plot(xs, [base + H * q for q in ys], color=color, lw=0.8 if clk else 1.25, zorder=3)
         else:
             gp = series(gate)
@@ -237,7 +227,7 @@ def wave(out, vcd_path, t0, t1):
                 cuts = [xa] + [tt / 1000 for tt, _ in gp if xa < tt / 1000 < xb] + [xb]
                 for ca, cb in zip(cuts[:-1], cuts[1:]):
                     if g_at((ca + cb) / 2 * 1000) == "1":
-                        ax.fill_between([ca, cb], base, base + H * ya, color=color, alpha=0.12, lw=0)
+                        ax.fill_between([ca, cb], base, base + H * ya, color=color, alpha=0.18, lw=0)
                         ax.plot([ca, cb], [base + H * ya] * 2, color=color, lw=1.25, zorder=3)
                     else:
                         ax.plot([ca, cb], [base + H / 2] * 2, color=INK2, lw=0.6, ls=(0, (2, 2)), zorder=2)
@@ -249,7 +239,7 @@ def wave(out, vcd_path, t0, t1):
             pre, ck = hs
             for t in posedges(ck):
                 if val_at(pre + "_valid", t) == "1" and val_at(pre + "_ready", t) == "1":
-                    ax.plot([t / 1000], [base + H], "o", ms=4.2, color=INK, mec=SURF, mew=1.0, zorder=5)
+                    ax.plot([t / 1000], [base + H], "o", ms=4.2, color=INK, mec=NONE, zorder=5)
         yt.append(base + H / 2); yl.append(label)
         y -= GAP
 
@@ -266,7 +256,7 @@ def wave(out, vcd_path, t0, t1):
     for i, (title, color) in ((0, ("(a) Source port, src_clk = 10 ns", SRC)), (8, ("(b) Destination port, dst_clk = 3 ns", DST))):
         ax.plot([t0, t0 + 2.2], [yt[i] + 0.98] * 2, color=color, lw=2.2, solid_capstyle="butt", clip_on=False)
         ax.text(t0 + 3.0, yt[i] + 0.98, title, va="center", fontsize=8.5)
-    ax.plot([t1 - 31.5], [yt[-1] - 1.05], "o", ms=4.2, color=INK, mec=SURF, mew=1.0, clip_on=False)
+    ax.plot([t1 - 31.5], [yt[-1] - 1.05], "o", ms=4.2, color=INK, mec=NONE, clip_on=False)
     ax.text(t1 - 30.3, yt[-1] - 1.05, "handshake    - - -  payload not valid", va="center", fontsize=7.5, color=INK2)
     ax.set_ylim(yt[-1] - 1.4, yt[0] + 1.35)
     fig.subplots_adjust(left=0.10, right=0.99, top=0.99, bottom=0.10)
@@ -274,6 +264,12 @@ def wave(out, vcd_path, t0, t1):
 
 
 # ----------------------------------------------------------------- figure 3
+# Closure steps: one hue, the fill grows step by step (open, half, solid), so
+# the order reads on any page color.
+STEP = [dict(mfc=NONE, mec=SRC, mew=1.3), dict(mfc=wash(SRC, 0.45), mec=SRC, mew=1.3),
+        dict(mfc=SRC, mec=SRC, mew=1.3)]
+
+
 def coverage(out, csv_path):
     rows = list(csv.DictReader(open(csv_path)))
     steps = [k for k in rows[0] if k not in ("config", "total", "note")]
@@ -285,8 +281,8 @@ def coverage(out, csv_path):
     for y, r in zip(ys, rows):
         vals = [int(r[s]) for s in steps]
         ax.plot([min(vals), max(vals)], [y, y], color=RULE, lw=1.0, zorder=1)
-        for v, c in zip(vals, STAGE):
-            ax.plot([v], [y], "o", ms=6.5, color=c, mec=SURF, mew=1.2, zorder=3)
+        for v, st in zip(vals, STEP):
+            ax.plot([v], [y], "o", ms=6.5, zorder=3, **st)
         ax.text(vals[0] - 0.9, y, str(vals[0]), ha="right", va="center", fontsize=8, color=INK2)
         ax.text(vals[-1] + 0.9, y, str(vals[-1]), ha="left", va="center", fontsize=8, color=INK)
         if r.get("note"):
@@ -309,7 +305,7 @@ def coverage(out, csv_path):
         ax.spines[side].set_visible(False)
     ax.grid(axis="x", color=GRID, lw=0.5)
     ax.set_axisbelow(True)
-    handles = [plt.Line2D([], [], ls="", marker="o", ms=6.5, color=c, mec=SURF, mew=1.2) for c in STAGE]
+    handles = [plt.Line2D([], [], ls="", marker="o", ms=6.5, **st) for st in STEP]
     ax.legend(handles, steps, loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=3, frameon=False,
               fontsize=8, handletextpad=0.3, columnspacing=1.6, borderaxespad=0)
     fig.subplots_adjust(left=0.15, right=0.98, top=0.86, bottom=0.19)
@@ -317,8 +313,7 @@ def coverage(out, csv_path):
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--dark"]
-    use_theme("dark" if "--dark" in sys.argv[1:] else "light")
+    args = sys.argv[1:]
     if len(args) < 2 or args[0] not in ("arch", "wave", "coverage"):
         sys.exit(__doc__)
     kind, out = args[0], args[1]

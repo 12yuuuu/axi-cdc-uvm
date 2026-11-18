@@ -23,7 +23,8 @@ CONFIGS = ["ram_d1", "ram_d2", "ram_d4", "ram_d6", "orig_d2"]
 NEGS = ["neg_rdata", "neg_bresp", "neg_aw_unstable", "neg_ptr_glitch", "neg_slave_wrap"]
 FIELDS = ["name", "set", "test", "seed", "use_ram", "log_depth", "result", "writes_ok", "reads_ok",
           "beats_ok", "wbeats_ok", "resp_err_ok", "bad", "src_stall_aw", "src_stall_w", "src_stall_ar",
-          "dst_stall_b", "dst_stall_r", "sva_errors", "sim_end_us"]
+          "dst_stall_b", "dst_stall_r", "sva_errors", "sim_end_us", "exit_code", "exit_ok"]
+PLAN_FIELDS = ["name", "set", "test", "seed", "use_ram", "log_depth", "trace"]
 
 
 def complete():
@@ -36,13 +37,17 @@ def complete():
             runs.append(dict(name=f"rand_{c}_s{s}", set="rand", test="rand_cov_test", seed=str(s), use_ram=ram,
                              log_depth=depth, result="PASS", writes_ok="10", reads_ok="10", beats_ok="40",
                              wbeats_ok="40", resp_err_ok="0", bad="0", src_stall_aw="1", src_stall_w="1",
-                             src_stall_ar="1", dst_stall_b="1", dst_stall_r="1", sva_errors="0", sim_end_us="5"))
+                             src_stall_ar="1", dst_stall_b="1", dst_stall_r="1", sva_errors="0", sim_end_us="5",
+                             exit_code="0", exit_ok="1"))
     negs = [dict(name=n, set="neg", test="smoke_test", seed="1", use_ram="1", log_depth="2", result="CAUGHT",
-                 bad="0", sva_errors="1") for n in NEGS]
+                 bad="0", sva_errors="1", exit_code="0", exit_ok="1") for n in NEGS]
     logs = {r["name"]: [f"[COVBIN] {g} 1" for g in goals] for r in runs}
     cov = {g: {c: 1 for c in CONFIGS + ["all"]} for g in goals}
     traces = [dict(ram="rand_ram_d2_s1", orig="rand_orig_d2_s1", same_transactions="1", same_order="1")]
-    return dict(runs=runs, negs=negs, logs=logs, cov=cov, traces=traces, mode="full")
+    plan = [dict({k: r[k] for k in PLAN_FIELDS if k != "trace"},
+                 trace="1" if r["name"] in ("rand_ram_d2_s1", "rand_orig_d2_s1") else "0")
+            for r in runs + negs]
+    return dict(runs=runs, negs=negs, logs=logs, cov=cov, traces=traces, plan=plan, mode="full")
 
 
 def run(d):
@@ -62,8 +67,15 @@ def run(d):
                 w.writerow(["bin"] + cols)
                 for b, v in d["cov"].items():
                     w.writerow([b] + [v[c] for c in cols])
+        if d["plan"] is not None:
+            with open(os.path.join(tmp, "manifest.csv"), "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=PLAN_FIELDS)
+                w.writeheader()
+                for p in d["plan"]:
+                    w.writerow(p)
         args = [os.path.join(tmp, "summary.csv"), os.path.join(tmp, "coverage.csv"),
                 "-o", os.path.join(tmp, "results.md"), "--goals", GOALS, "--logs", tmp,
+                "--manifest", os.path.join(tmp, "manifest.csv"),
                 "--configs", ",".join(CONFIGS), "--neg", ",".join(NEGS), "--mode", d["mode"]]
         if d["traces"] is not None:
             with open(os.path.join(tmp, "traces.csv"), "w", newline="") as f:
@@ -75,7 +87,9 @@ def run(d):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = report.main(args)
-        return rc, out.getvalue()
+        with open(os.path.join(tmp, "results.md")) as f:   # the page lists every open item
+            page = f.read()
+        return rc, out.getvalue() + page
 
 
 def case(name, want, change):
@@ -90,8 +104,32 @@ def case(name, want, change):
     verdict = "signed off" if rc == 0 else "not signed off"
     print(f"  {'ok  ' if ok else 'FAIL'} {name}: {verdict}")
     if not ok:
-        print("       " + (out.strip().splitlines() or [""])[-1])
+        print("       " + (out.strip().splitlines() or [""])[0])
     return ok
+
+
+def one_run_per_config(d):           # second review: one PASS per configuration, all
+    keep = [r for r in d["runs"] if r["name"].endswith("_s1")]      # negatives, full coverage
+    d["runs"] = keep                                                # and one trace, against
+    d["logs"] = {r["name"]: d["logs"][r["name"]] for r in keep}     # the full plan
+
+
+def extra_run(d):
+    r = dict(d["runs"][0], name="rand_ram_d1_s9", seed="9")
+    d["runs"].append(r)
+    d["logs"]["rand_ram_d1_s9"] = list(d["logs"]["rand_ram_d1_s1"])
+
+
+def plan_more_traces(d):
+    for p in d["plan"]:
+        if p["name"] in ("rand_ram_d2_s2", "rand_orig_d2_s2"):
+            p["trace"] = "1"
+
+
+def plan_lonely_trace(d):
+    for p in d["plan"]:
+        if p["name"] == "rand_ram_d2_s2":
+            p["trace"] = "1"
 
 
 def drop_bins_but_one(d):            # the reviewer's case: coverage with 1 hit bin
@@ -127,6 +165,20 @@ def main():
              lambda d: d["cov"][[b for b in sorted(d["cov"]) if b.startswith("scen.")][0]].update(all=0)),
         case("traces differ", "traces differ", lambda d: d["traces"][0].update(same_transactions="0")),
         case("no trace pairs", "no trace pairs", lambda d: d.update(traces=[])),
+        case("one run per configuration, the plan has two", "planned runs have no result", one_run_per_config),
+        case("a result that is not in the plan", "results are not in the plan", extra_run),
+        case("a result with another seed than planned", "results do not match the plan",
+             lambda d: d["runs"][4].update(seed="7")),
+        case("a result listed twice", "results appear more than once",
+             lambda d: d["runs"].append(dict(d["runs"][0]))),
+        case("no manifest", "run manifest is missing or empty", lambda d: d.update(plan=None)),
+        case("PASS text but a failing simulator exit status", "simulator exit status",
+             lambda d: d["runs"][2].update(exit_code="7", exit_ok="0")),
+        case("a planned trace pair not compared", "planned trace pairs were not compared", plan_more_traces),
+        case("a trace pair that is not in the plan", "trace pairs are not in the plan",
+             lambda d: d["traces"].append(dict(ram="rand_ram_d2_s2", orig="rand_orig_d2_s2",
+                                               same_transactions="1", same_order="0"))),
+        case("a planned trace run without its twin", "has no twin", plan_lonely_trace),
         case("quick mode, clock bins not hit", None,
              lambda d: (d.update(mode="quick"),
                         [v.update(all=0) for b, v in d["cov"].items() if b.startswith("clk.")])),

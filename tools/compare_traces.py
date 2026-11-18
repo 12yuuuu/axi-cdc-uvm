@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compare the transaction traces of axi_cdc_ram and axi_cdc runs.
 
-    python3 tools/compare_traces.py TRACE_DIR -o trace_compare.csv
+    python3 tools/compare_traces.py TRACE_DIR -o trace_compare.csv [--pair _ram_d2_:_orig_d2_]
 
 Every run started with +TRACE_FILE=<dir>/<name>.trace writes one line per
 transaction finished at src (axi_scoreboard::trace_line): every request
@@ -18,8 +18,10 @@ test, same seed, the two DUTs).
   same_order         1 if the lines are also in the same order (for
                      information only).
 
-A missing partner or an empty file counts as different. Exit code 0 if
-every pair has the same transactions and there is at least one pair.
+--pair A:B changes the two name parts that make a pair (sim/postfit.sh uses
+_rtl_:_gate_ for RTL vs. post-fit netlist). A missing partner or an empty
+file counts as different. Exit code 0 if every pair has the same
+transactions and there is at least one pair.
 """
 import argparse
 import collections
@@ -59,14 +61,14 @@ def compare(ram, orig):
     return row
 
 
-def pairs_in(d):
+def pairs_in(d, a=RAM, b=ORIG):
     names = {os.path.basename(p)[:-len(".trace")] for p in glob.glob(os.path.join(d, "*.trace"))}
     keys = set()
     for n in names:
-        if RAM in n:
+        if a in n:
             keys.add(n)
-        elif ORIG in n:
-            keys.add(n.replace(ORIG, RAM, 1))
+        elif b in n:
+            keys.add(n.replace(b, a, 1))
     return sorted(keys)
 
 
@@ -74,10 +76,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dir")
     ap.add_argument("-o", "--out", required=True)
+    ap.add_argument("--pair", default=f"{RAM}:{ORIG}", help="the two name parts that make a pair")
     a = ap.parse_args(argv)
+    pa, pb = a.pair.split(":", 1)
     rows = []
-    for ram_name in pairs_in(a.dir):
-        orig_name = ram_name.replace(RAM, ORIG, 1)
+    for ram_name in pairs_in(a.dir, pa, pb):
+        orig_name = ram_name.replace(pa, pb, 1)
         r = compare(read(os.path.join(a.dir, ram_name + ".trace")), read(os.path.join(a.dir, orig_name + ".trace")))
         rows.append(dict(ram=ram_name, orig=orig_name, **r))
     with open(a.out, "w", newline="") as f:

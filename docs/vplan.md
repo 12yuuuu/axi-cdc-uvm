@@ -17,17 +17,17 @@ with the same seeds, so the two can be compared.
 | Interfaces | AXI4 slave port on `src_clk`, AXI4 master port on `dst_clk` |
 | Clocks | independent, any ratio; tested 2-30 ns each, both directions, with and without coincident edges |
 | Reset | power-on only: both resets asserted together, released synchronously to their own clock (DUT rule) |
-| Level | RTL simulation, transaction-level UVM testbench, Cadence Xcelium |
+| Level | RTL simulation with a transaction-level UVM testbench (Cadence Xcelium); structural CDC check of the elaborated RTL (Yosys); Arria 10 post-fit netlist simulation and CDC timing constraints (Quartus Prime Pro) |
 
 ### Not covered here
 
 | Item | Why / where |
 |---|---|
-| Metastability, synchronizer MTBF | RTL simulation cannot show it. Needs structural CDC checks and timing constraints (`set_max_delay` on the async nets). Planned: metastability injection on the synchronizers (extra item). |
+| Metastability, synchronizer MTBF | Simulation cannot show it. The structure of every crossing is checked (`tools/cdc_check.py`) and its timing is bounded on an Arria 10 (`tools/fpga/`), see section 2. Metastability injection and an MTBF estimate are not done. |
 | Reset of one side during traffic | Not supported by the design (same rule as `axi_cdc`). |
 | Exclusive access, atomics (ATOP) | The DUT only carries these fields. The tests keep them at 0, because the slave model does not implement them. |
 | EXOKAY responses | Only with exclusive access (above). OKAY, SLVERR and DECERR are covered. |
-| Gate-level / post-fit timing | Extra item (Quartus post-fit netlist simulation). |
+| Post-fit timing simulation | Quartus offers no timing simulation for Arria 10. The post-fit netlist is simulated with zero delay (functional), and timing is covered by static timing analysis. ASIC gate level is out of scope. |
 
 ## 2. Checkers
 
@@ -46,8 +46,13 @@ with the same seeds, so the two can be compared.
 | AXI handshake rules (SVA) | on both sides, every channel: VALID stays high until READY; payload stable while waiting; no X on VALID/READY, none on the payload while VALID; VALID low right after reset | `tb/sva/axi_handshake_sva.sv` (`SVA_AW` ... `SVA_R`) |
 | CDC pointer rules (SVA, bound into the RTL) | crossing pointers change one bit per clock; a pointer moves exactly on a handshake; occupancy stays in 0..2^LogDepth (each side's view, and the real one for the RAM FIFO) | `tb/sva/cdc_fifo_sva.sv` (`SVA_GRAY`, `SVA_MOVE`, `SVA_OCC`) |
 | Checker sanity | each injected fault must make the test fail with errors of the checker it is aimed at, and the checkers it is not aimed at must report nothing: wrong R data -> `SB_DATA`, no SVA; B OKAY turned into SLVERR -> `SB_RESP`, no SVA; AW payload change while waiting -> `SVA_AW`, no scoreboard error; pointer glitch -> `SVA_GRAY`, no scoreboard error; slave forgets to wrap WRAP bursts -> `SB_DATA`, no bridge, response or SVA error | negative tests `+INJECT_RDATA_ERR`, `+INJECT_BRESP_ERR`, `+INJECT_AW_UNSTABLE`, `+INJECT_PTR_GLITCH`, `+INJECT_SLV_WRAP_BUG` |
-| Same seed, both DUTs | runs with a twin on the other DUT write a trace (`+TRACE_FILE`): one line per transaction finished at the source with every request field, hashes of data, strobes and user bits, and a hash of the responses. The two traces must hold the same lines (as a multiset: completion order may differ, AXI only orders same-ID responses) | `tools/compare_traces.py` |
-| Sign-off script | incomplete or bad results must not sign off; 26 cases | `tools/test_report.py`, also in CI |
+| Same seed, both DUTs | runs with a twin on the other DUT write a trace (`+TRACE_FILE`): one line per transaction finished at the source with every request field, 64-bit FNV-1a hashes of data, strobes and user bits, and a hash of the responses. The two traces must hold the same lines (as a multiset: completion order may differ, AXI only orders same-ID responses). A hash can collide, so this is a trace comparison (regression evidence), not a formal equivalence proof | `tools/compare_traces.py` |
+| Simulator exit status | every run records the exit status of xrun. A non-zero status fails the run, unless the only error is the known `*E,IMPDLL` start-up error (assertion failures, `*E,ASRTST`, are judged by the verdict) and the log shows `$finish` and the normal exit line | `sim/common.sh` (`exit_ok`) |
+| Run plan | `regress.sh` first writes every planned run to `manifest.csv` (name, set, test, seed, DUT, depth, trace), then runs them. The report requires exactly one result per planned run with the same fields, no unplanned or duplicate results, and every planned trace pair compared | `sim/regress.sh`, `tools/report.py --manifest` |
+| Sign-off script | incomplete or bad results must not sign off: 35 cases on the report, 4 runs of the regression scripts against a fake xrun (normal, IMPDLL, PASS with exit status 7, crash) | `tools/test_report.py`, `sim/test_regress.sh`, both in CI |
+| Structural CDC | the elaborated RTL (Yosys with the slang frontend) is traced bit by bit to the clock domains each flop, memory port and output depends on. Each crossing must be a synchronizer (at least 2 stages, no logic in front, first stage drives only the second), a dual-clock memory whose ports are driven from their own domains, or a FIFO read mux selected from the reading domain. Also checked: reconvergence of synchronized bits, reset and clock domains, combinational outputs, and the expected count of each structure | `tools/cdc_check.py` (5 configurations), self-test with 10 small designs; also in CI |
+| CDC timing (FPGA) | Quartus Prime Pro, Arria 10, `LogDepth` 2. The clocks are asynchronous groups; every gray-pointer bundle has `set_net_delay` and `set_max_skew`, every data crossing in fabric registers `set_data_delay`. A checker reads the reports of all four corners and fails unless every crossing is constrained and met and every cut path is accounted for; its self-test plants 22 defects in copies of the reports | `sim/postfit.sh`, `tools/fpga/check_cdc.py`, `tools/fpga/test_check_cdc.py` |
+| Post-fit trace comparison | 11 tests run on the RTL and on the post-fit functional netlist with the same seeds; both runs must pass with an accepted exit status and 0 assertion fires, and their traces must hold the same transactions. The page also reports whether the order, the transaction, beat and stall counts and the end time are the same | `sim/postfit.sh`, `tools/postfit_report.py` |
 
 ## 3. Features
 
@@ -71,6 +76,8 @@ with the same seeds, so the two can be compared.
 | F14 | Responses that AXI allows out of order cross unchanged: B of different IDs out of order, R beats of different IDs interleaved; same-ID order kept | bridge check, monitors (R rebuilt per ID) | `rand_ooo_test` | `flow.reorder.*` |
 | F15 | SLVERR and DECERR cross unchanged on B and on every R beat; failed writes do not change memory | response check, data check | `rand_ooo_test` (region E) | `txn.resp.*`, `txn.x_kr.*` |
 | F16 | The data check does not depend on code it checks: a bug in the slave's address computation is caught | address-model check; negative test `neg_slave_wrap` | `addr_model_test` | - |
+| F17 | Every clock crossing has a safe structure, and on an FPGA its timing is bounded | structural CDC, CDC timing | `tools/cdc_check.py`, `sim/postfit.sh` | - |
+| F18 | The FPGA implementation behaves like the RTL | post-fit trace comparison | 11 tests of `sim/postfit.sh` | - |
 
 ## 4. Coverage model
 
@@ -112,13 +119,20 @@ sign-off.
     the CDC logic is the same for every depth, only the pointer width
     changes, and that is covered by filling and draining every FIFO at
     every depth;
-  * at least one pair of traces, and every pair the same (F13).
+  * at least one pair of traces, and every pair the same (F13);
+  * every run in the plan has exactly one result with the planned fields,
+    and no result is outside the plan; every planned trace pair is compared;
+  * every run has an accepted simulator exit status (section 2).
+* `tools/cdc_check.py` and `sim/postfit.sh` give their own verdicts
+  ([cdc.md](cdc.md), [postfit.md](postfit.md)).
 
 ## 6. Status
 
 Final regression (`bash sim/regress.sh`, 2026-11-17, full page in
 [results.md](results.md)): **signed off**.
 
+* 269 runs and 5 negative tests, all 274 in the plan with one result each;
+  every exit status accepted (status 1 from `*E,IMPDLL`, see the README).
 * 269 runs, 0 failures; 59,761 writes (814,861 beats) and 107,195 reads;
   1,565,019 read beats matched the reference model; 128,746 SLVERR/DECERR
   responses checked; 0 assertion fires.
@@ -126,10 +140,20 @@ Final regression (`bash sim/regress.sh`, 2026-11-17, full page in
   silent. The AW payload change is caught by the handshake assertion alone
   (scoreboard: 0 errors); the slave's WRAP bug by the data check alone
   (bridge and response checks: 0 errors).
-* Coverage: 146/146 defined bins, merged over all runs. Every configuration
-  hits all 94 `txn`, `flow` and `order` bins.
+* Coverage: 146/146 defined bins, merged over all runs. Per configuration:
+  LogDepth 1 135/146, 2 146/146, 4 140/146, 6 141/146, `axi_cdc` 144/146.
+  Every configuration hits all 94 `txn`, `flow` and `order` bins; the
+  missing ones are clock-relation bins (table below).
 * 48 trace pairs (`axi_cdc_ram` vs. `axi_cdc`, same test and seed): all hold
   the same transactions; 8 also finish in the same order.
+* Structural CDC ([cdc.md](cdc.md)): 0 violations in all 5 configurations;
+  10 synchronized pointers of 2 stages each per DUT, 5 dual-clock memories in
+  `axi_cdc_ram`, 291 read-mux bits in `axi_cdc`. Self-test 10/10.
+* FPGA ([postfit.md](postfit.md), 2026-11-17): CDC timing met in all four
+  corners (worst pointer net delay 0.500 ns, skew 0.456 ns, bound 3.333 ns;
+  the B FIFO stayed in registers, its 28 data paths are bounded and met);
+  checker self-test 22/22. Post-fit netlist: 11/11 tests pass on both, with
+  the same transactions, order, counts and end time.
 
 | ID | Status | Evidence |
 |---|---|---|
@@ -144,6 +168,8 @@ Final regression (`bash sim/regress.sh`, 2026-11-17, full page in
 | F14 | done | `flow.reorder.*` in every configuration (B out of order 2,933 times, R interleaved 227,402 times); 0 bridge errors |
 | F15 | done | `txn.resp.*`, `txn.x_kr.*` in every configuration; 128,746 error responses, 0 response errors; `neg_bresp` caught |
 | F16 | done | `addr_model_test`: 15 + 20,000 bursts, 0 mismatches; Python model 15/15; `neg_slave_wrap` caught by the data check only |
+| F17 | done | structural CDC 0 violations in 5 configurations; CDC timing met in 4 corners |
+| F18 | done | post-fit trace comparison 11/11 |
 
 Clock-relation bins that a single configuration did not hit (they are hit
 over all runs, as section 5 allows):
@@ -173,3 +199,7 @@ Two bugs in the testbench itself turned up on the way and are fixed: a read
 that raced a write to the same address (Stage 7), and a 32-bit overflow in
 the address-window constraint that let bursts wrap around at 2^32 and break
 the per-ID slices (Stage 11; now 64-bit sums plus `SEQ_RANGE`).
+
+A review of the scripts found two gaps, both closed in Stage 12: the run
+verdict ignored the simulator's exit status, and the report did not know
+which runs were planned. Both are now part of sign-off (section 5).

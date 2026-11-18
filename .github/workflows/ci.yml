@@ -17,8 +17,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - name: Install slang
-        run: pip install pyslang==12.1.0
+      - name: Install slang and Yosys (with the slang frontend)
+        run: pip install pyslang==12.1.0 yowasp-yosys==0.71.0.0.post1285
       - name: Get the Accellera UVM library
         run: git clone --depth 1 --branch 2020.3.1 https://github.com/accellera-official/uvm-core.git "$RUNNER_TEMP/uvm-core"
       - name: Compile RTL + UVM testbench + SVA with slang
@@ -29,3 +29,9 @@ jobs:
         run: python3 tools/axi_addr_model.py
       - name: Shell scripts parse
         run: for f in sim/*.sh; do bash -n "$f"; done
+      - name: Regression scripts against a fake simulator (exit status, plan, sign-off)
+        run: bash sim/test_regress.sh
+      - name: Structural CDC check (checker test designs, then the DUT in 5 configurations)
+        run: |
+          python3 tools/cdc_check.py --self-test
+          python3 tools/cdc_check.py

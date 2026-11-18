@@ -156,17 +156,18 @@ class axi_scoreboard extends uvm_scoreboard;
     end
   endfunction
 
-  // 32-bit FNV-1a over a byte stream, to keep trace lines short.
-  static function bit [31:0] fnv(bit [31:0] h, logic [63:0] v, int unsigned nbytes);
+  // 64-bit FNV-1a over a byte stream, to keep trace lines short. A hash can
+  // collide, so a trace comparison is regression evidence, not a proof.
+  static function bit [63:0] fnv(bit [63:0] h, logic [63:0] v, int unsigned nbytes);
     for (int unsigned b = 0; b < nbytes; b++) begin
-      h = h ^ 32'(v[8*b +: 8]);
-      h = h * 32'h0100_0193;
+      h = h ^ 64'(v[8*b +: 8]);
+      h = h * 64'h0000_0100_0000_01b3;
     end
     return h;
   endfunction
 
   function string trace_line(axi_seq_item t);
-    bit [31:0] hd = 32'h811c_9dc5, hr = 32'h811c_9dc5;
+    bit [63:0] hd = 64'hcbf2_9ce4_8422_2325, hr = 64'hcbf2_9ce4_8422_2325;
     if (t.kind == AXI_WRITE) begin
       foreach (t.data[i]) begin
         hd = fnv(hd, 64'(t.data[i]), SW);

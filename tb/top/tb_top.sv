@@ -21,6 +21,9 @@
 //                              the CDC assertions must fail)
 // Assertions: tb/sva/*.sv, instantiated and bound below (compile with
 // +define+NO_SVA to leave them out).
+// +define+POSTFIT: USE_RAM=1 instantiates axi_cdc_ram_flat, the post-fit
+// gate-level netlist from Quartus (sim/postfit.sh), instead of the RTL. Its
+// ports are flat vectors with the same bit layout as the AXI structs.
 // Parameters (use -defparam): USE_RAM, LOG_DEPTH, SYNC_STAGES
 
 `include "uvm_macros.svh"
@@ -77,6 +80,24 @@ module tb_top;
 
   // ----------------------------------------------------------------------- DUT
   if (USE_RAM) begin : g_dut
+`ifdef POSTFIT
+    logic [$bits(axi_req_t)-1:0]  pf_src_req, pf_dst_req;
+    logic [$bits(axi_resp_t)-1:0] pf_src_resp, pf_dst_resp;
+    assign pf_src_req  = src_req;
+    assign pf_dst_resp = dst_resp;
+    assign src_resp    = axi_resp_t'(pf_src_resp);
+    assign dst_req     = axi_req_t'(pf_dst_req);
+    axi_cdc_ram_flat i_dut (           // ports by name: the netlist may reorder them
+      .src_clk_i  ( src_clk     ),
+      .src_rst_ni ( src_rst_n   ),
+      .src_req_i  ( pf_src_req  ),
+      .src_resp_o ( pf_src_resp ),
+      .dst_clk_i  ( dst_clk     ),
+      .dst_rst_ni ( dst_rst_n   ),
+      .dst_req_o  ( pf_dst_req  ),
+      .dst_resp_i ( pf_dst_resp )
+    );
+`else
     axi_cdc_ram #(
       .aw_chan_t  ( axi_aw_chan_t ),
       .w_chan_t   ( axi_w_chan_t  ),
@@ -112,6 +133,7 @@ module tb_top;
       @(posedge src_clk);
       release i_dut.i_cdc_fifo_r.async_rptr;
     end
+`endif
   end else begin : g_dut
     axi_cdc #(
       .aw_chan_t  ( axi_aw_chan_t ),
