@@ -26,12 +26,15 @@ INK, INK2, GRID, SURF = "#222222", "#5a5a5a", "#e3e3e3", "#ffffff"
 SRC, DST = "#6E64B0", "#CC6677"               # source / destination clock domain
 STAGE = ["#A39DD2", "#6E64B0", "#3B2F8C"]      # coverage-closure steps, light -> dark
 MONO = "DejaVu Sans Mono"
+# no date or tool version in the files, so a rebuild without changes is byte-identical
+META = {"svg": {"Date": None, "Creator": None}, "pdf": {"CreationDate": None, "Creator": None, "Producer": None}}
 
 plt.rcParams.update({
     "font.family": "STIXGeneral", "mathtext.fontset": "stix", "font.size": 9,
     "axes.linewidth": 0.6, "axes.edgecolor": INK2, "svg.fonttype": "path",
     "xtick.major.width": 0.6, "ytick.major.width": 0.6, "xtick.color": INK2,
     "ytick.color": INK2, "axes.labelcolor": INK, "text.color": INK, "savefig.dpi": 220,
+    "svg.hashsalt": "axi_cdc_uvm",
 })
 
 
@@ -45,9 +48,9 @@ def tint(hex_color, a):
 
 # ----------------------------------------------------------------- figure 1
 def arch(out):
-    fig, ax = plt.subplots(figsize=(7.2, 4.7))
+    fig, ax = plt.subplots(figsize=(7.2, 4.9))
     ax.set_xlim(0, 100)
-    ax.set_ylim(-13, 60)
+    ax.set_ylim(-15.5, 60)
     ax.axis("off")
 
     def box(x, y, w, h, title, sub=None, mono=False, ty=None):
@@ -77,7 +80,7 @@ def arch(out):
         ax.text(x0 + 1 if ha == "left" else x1 - 1, 56.6, name, ha=ha, fontsize=8, style="italic")
 
     # UVM test layer
-    box(36.5, 47.0, 27, 9.5, "Tests + config object", "8 tests · one seed sets the clocks,\nthe knobs and the traffic", ty=53.6)
+    box(36.5, 47.0, 27, 9.5, "Tests + config object", "10 tests · one seed sets the clocks,\nthe knobs and the traffic", ty=53.6)
 
     arrow((36.5, 50.5), (31, 49.25))                          # test starts the sequences
     arrow((63.5, 50.5), (82.5, 41), ls=(0, (2, 1.5)))          # config knobs reach the slave
@@ -90,7 +93,7 @@ def arch(out):
     arrow((17.5, 45), (17.5, 41))
 
     # destination side
-    box(69, 18, 27, 23, "Reactive memory slave", "sparse memory\nrandom READY and delays\nhold knobs fill the FIFOs", ty=36.5)
+    box(69, 18, 27, 23, "Reactive memory slave", "sparse memory · random READY, delays\nB out of order across IDs\nR interleaved across IDs\nSLVERR / DECERR pages\nhold knobs fill the FIFOs", ty=36.5)
     box(69, 5, 27, 8, "Monitor (dest. port)", "transactions · stall counters")
 
     # DUT
@@ -127,13 +130,13 @@ def arch(out):
     ax.plot([50, 50], [14.6, 16.5], color=INK, lw=0.6, ls=(0, (2, 1.5)), zorder=4)
 
     # checkers
-    box(4, -12, 40, 8.5, "Functional coverage", "5 covergroups · crosses · 135 bins · per-config merge")
-    box(56, -12, 40, 8.5, "Scoreboard", "bridge check (k-th in = k-th out) + reference memory")
+    box(4, -14.5, 40, 11, "Functional coverage", "5 covergroups · crosses · 146 bins\nmerged per configuration", ty=-6.6)
+    box(56, -14.5, 40, 11, "Scoreboard", "bridge check (k-th in = k-th out)\nreference model (AXI spec pseudo-code)\nresponse check against the address map", ty=-6.2)
     arrow((12, 5), (12, -3.5))
     arrow((25, 5), (64, -3.5))
     arrow((82.5, 5), (82.5, -3.5))
     fig.subplots_adjust(0.005, 0.005, 0.995, 0.995)
-    fig.savefig(out, facecolor=SURF)
+    fig.savefig(out, facecolor=SURF, metadata=META.get(out.rsplit(".", 1)[-1]))
 
 
 # ----------------------------------------------------------------- figure 2
@@ -247,7 +250,7 @@ def wave(out, vcd_path, t0, t1):
     ax.text(t1 - 30.3, yt[-1] - 1.05, "handshake    - - -  payload not valid", va="center", fontsize=7.5, color=INK2)
     ax.set_ylim(yt[-1] - 1.4, yt[0] + 1.35)
     fig.subplots_adjust(left=0.10, right=0.99, top=0.99, bottom=0.10)
-    fig.savefig(out, facecolor=SURF)
+    fig.savefig(out, facecolor=SURF, metadata=META.get(out.rsplit(".", 1)[-1]))
 
 
 # ----------------------------------------------------------------- figure 3
@@ -290,7 +293,7 @@ def coverage(out, csv_path):
     ax.legend(handles, steps, loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=3, frameon=False,
               fontsize=8, handletextpad=0.3, columnspacing=1.6, borderaxespad=0)
     fig.subplots_adjust(left=0.15, right=0.98, top=0.86, bottom=0.19)
-    fig.savefig(out, facecolor=SURF)
+    fig.savefig(out, facecolor=SURF, metadata=META.get(out.rsplit(".", 1)[-1]))
 
 
 if __name__ == "__main__":

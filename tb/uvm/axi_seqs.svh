@@ -60,11 +60,26 @@ class axi_rand_seq extends uvm_sequence #(axi_seq_item);
     super.new(name);
   endfunction
 
+  // Derived sequences may hand out a derived item with more constraints.
+  virtual function axi_seq_item new_item();
+    return axi_seq_item::type_id::create("t");
+  endfunction
+
+  // Every byte the burst may touch lies in [base, base + span). Checked
+  // after randomize(), so a wrong constraint fails loudly instead of
+  // quietly sending traffic somewhere else.
+  virtual function bit in_window(axi_seq_item t);
+    longint unsigned bytes = (longint'(t.len) + 1) << t.size;
+    longint unsigned lo    = t.addr;
+    if (t.burst == axi_pkg::BURST_WRAP) lo = (lo / bytes) * bytes;   // wrap block start
+    return lo >= base && lo + bytes <= longint'(base) + span;
+  endfunction
+
   task body();
     axi_seq_item t;
     int unsigned lead = (aw_lead < 0) ? -aw_lead : aw_lead;
     repeat (n) begin
-      t = axi_seq_item::type_id::create("t");
+      t = new_item();
       t.max_len   = max_len;
       t.any_burst = any_burst;
       t.any_size  = any_size;
@@ -75,8 +90,10 @@ class axi_rand_seq extends uvm_sequence #(axi_seq_item);
       if (!t.randomize() with {
             (local::kind_sel == 1) -> kind == AXI_WRITE;
             (local::kind_sel == 0) -> kind == AXI_READ;
+            // 64-bit sums: in 32 bits addr + bytes wraps at 2**32, and a
+            // burst at the top of the address space would "fit" (Stage 11).
             addr >= local::base;
-            (addr + ((len + 1) << size)) <= (local::base + local::span);
+            (64'(addr) + ((64'(len) + 64'd1) << size)) <= (64'(local::base) + 64'(local::span));
             len >= local::min_len;
             id <= local::id_max;
             (local::aw_lead > 0) -> (w_delay == local::aw_lead && aw_delay == 0);
@@ -84,9 +101,54 @@ class axi_rand_seq extends uvm_sequence #(axi_seq_item);
             (local::aw_lead != 0) -> w_gap == 0;
           })
         `uvm_fatal("RAND", $sformatf("%s: randomize() failed", get_name()))
+      if (!in_window(t))
+        `uvm_error("SEQ_RANGE", $sformatf("%s: burst outside [%h, %h): %s", get_name(), base,
+                                          64'(base) + 64'(span), t.convert2string()))
       finish_item(t);
     end
   endtask
+endclass
+
+// Item whose footprint stays inside the address slice of its ID.
+class axi_part_item extends axi_seq_item;
+  `uvm_object_utils(axi_part_item)
+  addr_t       part_base;
+  int unsigned part_size;   // bytes per ID
+  constraint c_part {   // 64-bit sums, see axi_rand_seq
+    64'(addr) >= 64'(part_base) + 64'(id) * 64'(part_size);
+    (64'(addr) + ((64'(len) + 64'd1) << size)) <= 64'(part_base) + (64'(id) + 64'd1) * 64'(part_size);
+  }
+  function new(string name = "axi_part_item");
+    super.new(name);
+  endfunction
+endclass
+
+// axi_rand_seq where every ID writes and reads only its own slice of
+// [base, base + span). Needed when responses come back out of order: AXI
+// does not order writes with different IDs, so if two IDs wrote the same
+// byte, the final value would depend on the slave's order and the reference
+// model could not know it. With one slice per ID that cannot happen.
+class axi_rand_part_seq extends axi_rand_seq;
+  `uvm_object_utils(axi_rand_part_seq)
+  function new(string name = "axi_rand_part_seq");
+    super.new(name);
+  endfunction
+  function axi_seq_item new_item();
+    axi_part_item t = axi_part_item::type_id::create("t");
+    t.part_base = base;
+    t.part_size = span / (id_max + 1);
+    return t;
+  endfunction
+
+  // Also inside the slice of its ID.
+  function bit in_window(axi_seq_item t);
+    longint unsigned slice = span / (id_max + 1);
+    longint unsigned bytes = (longint'(t.len) + 1) << t.size;
+    longint unsigned lo    = t.addr;
+    longint unsigned s_lo  = longint'(base) + longint'(t.id) * slice;
+    if (t.burst == axi_pkg::BURST_WRAP) lo = (lo / bytes) * bytes;
+    return super.in_window(t) && lo >= s_lo && lo + bytes <= s_lo + slice;
+  endfunction
 endclass
 
 // Read every byte of [base, base + bytes) with full-width 16-beat INCR

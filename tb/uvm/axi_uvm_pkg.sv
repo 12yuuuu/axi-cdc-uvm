@@ -16,6 +16,7 @@ package axi_uvm_pkg;
   `include "axi_monitor.svh"
   `include "axi_master_agent.svh"
   `include "axi_slave_mem.svh"
+  `include "axi_ref_model.svh"
   `include "axi_scoreboard.svh"
   `include "axi_coverage.svh"
   `include "axi_env.svh"

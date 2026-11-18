@@ -39,12 +39,12 @@ module cdc_src_ptr_sva
   default disable iff (!src_rst_ni);
 
   a_gray: assert property ($countones(async_wptr_o ^ $past(async_wptr_o)) <= 1)
-    else `uvm_error("SVA_GRAY", $sformatf("%m: write pointer changed more than one bit (now %b)", async_wptr_o))
+    else `uvm_error("SVA_GRAY", $sformatf("%m: write pointer changed more than one bit (now %b)", $sampled(async_wptr_o)))
   a_move: assert property ((async_wptr_o != $past(async_wptr_o)) == $past(src_valid_i && src_ready_o))
     else `uvm_error("SVA_MOVE", $sformatf("%m: write pointer moved without a write, or a write did not move it"))
   a_occ : assert property ((LogDepth + 1)'(wptr_bin - rptr_bin) <= (1 << LogDepth))
     else `uvm_error("SVA_OCC", $sformatf("%m: write side sees %0d entries (max %0d)",
-                                         (LogDepth + 1)'(wptr_bin - rptr_bin), 1 << LogDepth))
+                                         (LogDepth + 1)'($sampled(wptr_bin) - $sampled(rptr_bin)), 1 << LogDepth))
 endmodule
 
 module cdc_dst_ptr_sva
@@ -64,12 +64,12 @@ module cdc_dst_ptr_sva
   default disable iff (!dst_rst_ni);
 
   a_gray: assert property ($countones(async_rptr_o ^ $past(async_rptr_o)) <= 1)
-    else `uvm_error("SVA_GRAY", $sformatf("%m: read pointer changed more than one bit (now %b)", async_rptr_o))
+    else `uvm_error("SVA_GRAY", $sformatf("%m: read pointer changed more than one bit (now %b)", $sampled(async_rptr_o)))
   a_move: assert property ((async_rptr_o != $past(async_rptr_o)) == $past(dst_valid_o && dst_ready_i))
     else `uvm_error("SVA_MOVE", $sformatf("%m: read pointer moved without a read, or a read did not move it"))
   a_occ : assert property ((LogDepth + 1)'(wptr_bin - rptr_bin) <= (1 << LogDepth))
     else `uvm_error("SVA_OCC", $sformatf("%m: read side sees %0d entries (max %0d)",
-                                         (LogDepth + 1)'(wptr_bin - rptr_bin), 1 << LogDepth))
+                                         (LogDepth + 1)'($sampled(wptr_bin) - $sampled(rptr_bin)), 1 << LogDepth))
 endmodule
 
 module cdc_ram_fifo_sva
@@ -94,13 +94,13 @@ module cdc_ram_fifo_sva
   // The pointers on the nets that cross the clock boundary.
   a_gray_w: assert property (@(posedge src_clk_i) disable iff (!src_rst_ni)
                              $countones(async_wptr ^ $past(async_wptr)) <= 1)
-    else `uvm_error("SVA_GRAY", $sformatf("%m: crossing write pointer changed more than one bit (now %b)", async_wptr))
+    else `uvm_error("SVA_GRAY", $sformatf("%m: crossing write pointer changed more than one bit (now %b)", $sampled(async_wptr)))
   a_gray_r: assert property (@(posedge dst_clk_i) disable iff (!dst_rst_ni)
                              $countones(async_rptr ^ $past(async_rptr)) <= 1)
-    else `uvm_error("SVA_GRAY", $sformatf("%m: crossing read pointer changed more than one bit (now %b)", async_rptr))
+    else `uvm_error("SVA_GRAY", $sformatf("%m: crossing read pointer changed more than one bit (now %b)", $sampled(async_rptr)))
   // Real occupancy, at every edge of either clock.
   a_occ   : assert property (@(posedge src_clk_i or posedge dst_clk_i) disable iff (!src_rst_ni || !dst_rst_ni)
                              (LogDepth + 1)'(g2b(async_wptr) - g2b(async_rptr)) <= (1 << LogDepth))
     else `uvm_error("SVA_OCC", $sformatf("%m: FIFO holds %0d entries (max %0d)",
-                                         (LogDepth + 1)'(g2b(async_wptr) - g2b(async_rptr)), 1 << LogDepth))
+                                         (LogDepth + 1)'(g2b($sampled(async_wptr)) - g2b($sampled(async_rptr))), 1 << LogDepth))
 endmodule

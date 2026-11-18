@@ -31,7 +31,7 @@ module axi_handshake_sva
     else `uvm_error("SVA_AW", $sformatf("%m: VALID dropped before READY"))
   a_aw_stable: assert property (vif.aw_valid && !vif.aw_ready |=> $stable({vif.aw_id, vif.aw_addr, vif.aw_len, vif.aw_size, vif.aw_burst, vif.aw_lock, vif.aw_cache,
                                       vif.aw_prot, vif.aw_qos, vif.aw_region, vif.aw_atop, vif.aw_user}))
-    else `uvm_error("SVA_AW", $sformatf("%m: payload changed while VALID=1, READY=0 (addr now %h)", vif.aw_addr))
+    else `uvm_error("SVA_AW", $sformatf("%m: payload changed while VALID=1, READY=0 (addr now %h)", $sampled(vif.aw_addr)))
   a_aw_x     : assert property (!$isunknown({vif.aw_valid, vif.aw_ready}) &&
                                 (!vif.aw_valid || !$isunknown({vif.aw_id, vif.aw_addr, vif.aw_len, vif.aw_size, vif.aw_burst, vif.aw_lock, vif.aw_cache,
                                       vif.aw_prot, vif.aw_qos, vif.aw_region, vif.aw_atop, vif.aw_user})))

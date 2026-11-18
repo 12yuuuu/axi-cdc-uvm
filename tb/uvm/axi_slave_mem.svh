@@ -6,7 +6,18 @@
 // one process per channel. READY on AW/W/AR and the B/R timing follow the
 // cfg knobs, so tests can add back-pressure or stall the slave completely.
 // Writes are applied when an AW and its whole W burst have both arrived
-// (W may arrive first). Responses come back in order.
+// (W may arrive first).
+//
+// Responses: in order by default. With the cfg knobs, B responses of
+// different IDs may come back out of order, and the beats of up to
+// slv_r_active read bursts with different IDs may be interleaved (AXI
+// A5.3: only responses with the same ID must stay in order). With err_en,
+// bursts in the error pages get SLVERR / DECERR (cfg.resp_for): their
+// writes are dropped and their reads return data 0.
+//
+// +INJECT_SLV_WRAP_BUG (negative test): the slave forgets to wrap WRAP
+// bursts. The bus traffic stays legal and both monitors agree, so only the
+// end-to-end data check (with its own address math) can see it.
 class axi_slave_mem extends uvm_component;
   `uvm_component_utils(axi_slave_mem)
 
@@ -20,6 +31,7 @@ class axi_slave_mem extends uvm_component;
   axi_seq_item ar_fifo[$];  // AR accepted, R beats to send
   data_t       w_data[$];   // W burst being received
   strb_t       w_strb[$];
+  bit          inj_wrap_bug;
 
   function new(string name, uvm_component parent);
     super.new(name, parent);
@@ -31,6 +43,27 @@ class axi_slave_mem extends uvm_component;
       `uvm_fatal("NOVIF", "no virtual interface for the slave memory")
     if (!uvm_config_db #(axi_tb_cfg)::get(this, "", "cfg", cfg))
       cfg = axi_tb_cfg::type_id::create("cfg");
+    inj_wrap_bug = $test$plusargs("INJECT_SLV_WRAP_BUG");
+  endfunction
+
+  // Address of beat i as the slave computes it.
+  function addr_t beat_addr(axi_seq_item t, int unsigned i);
+    if (inj_wrap_bug && t.burst == axi_pkg::BURST_WRAP)  // injected bug: no wrap
+      return (t.addr & ~addr_t'((1 << t.size) - 1)) + addr_t'(i << t.size);
+    return axi_seq_item::calc_beat_addr(t.addr, t.size, t.len, t.burst, i);
+  endfunction
+
+  // Index of the response to send next: 0 (in order), or with the OOO knob
+  // a random entry that has no older entry with the same ID.
+  function int unsigned pick(axi_seq_item q[$], int unsigned pct);
+    int unsigned ok[$];
+    if (q.size() < 2 || pct == 0 || !axi_tb_cfg::chance(pct)) return 0;
+    foreach (q[i]) begin
+      bit older_same_id = 1'b0;
+      for (int unsigned j = 0; j < i; j++) if (q[j].id == q[i].id) older_same_id = 1'b1;
+      if (!older_same_id) ok.push_back(i);
+    end
+    return ok[$urandom_range(ok.size() - 1)];
   endfunction
 
   task run_phase(uvm_phase phase);
@@ -79,9 +112,10 @@ class axi_slave_mem extends uvm_component;
       wb = wb_fifo.pop_front();
       if (wb.data.size() != aw.num_beats())
         `uvm_error("SLV_WLEN", $sformatf("W burst has %0d beats, AW len says %0d", wb.data.size(), aw.num_beats()))
-      foreach (wb.data[i])
-        write_beat(axi_seq_item::calc_beat_addr(aw.addr, aw.size, aw.len, aw.burst, i),
-                   wb.data[i], wb.strb[i]);
+      aw.resp    = new[1];
+      aw.resp[0] = cfg.resp_for(aw.addr);
+      if (aw.resp[0] == axi_pkg::RESP_OKAY)
+        foreach (wb.data[i]) write_beat(beat_addr(aw, i), wb.data[i], wb.strb[i]);
       b_fifo.push_back(aw);
     end
   endfunction
@@ -138,22 +172,29 @@ class axi_slave_mem extends uvm_component;
     bit          loaded  = 1'b0;
     bit          valid_q = 1'b0;
     int unsigned wait_c  = 0;
+    int unsigned gath_c  = 0;
     forever begin
       @(vif.slv_cb);
       if (valid_q && vif.slv_cb.b_ready === 1'b1) begin
         valid_q = 1'b0;
         loaded  = 1'b0;
       end
-      if (!loaded && b_fifo.size() > 0) begin
-        t      = b_fifo.pop_front();
+      // slv_b_gather = 0 (every test but rand_ooo_test): no extra wait and
+      // no extra random draw, so those tests stay as they were.
+      if (!loaded && b_fifo.size() == 1 && gath_c < cfg.slv_b_gather) gath_c++;
+      else if (!loaded && b_fifo.size() > 0) begin
+        int unsigned k = pick(b_fifo, cfg.slv_b_ooo_pct);
+        t      = b_fifo[k];
+        b_fifo.delete(k);
         wait_c = axi_tb_cfg::rand_upto(cfg.slv_b_delay_max);
         loaded = 1'b1;
+        gath_c = 0;
       end
       if (loaded && !valid_q) begin
         if (wait_c > 0) wait_c--;
         else begin
           vif.slv_cb.b_id   <= t.id;
-          vif.slv_cb.b_resp <= axi_pkg::RESP_OKAY;
+          vif.slv_cb.b_resp <= t.resp[0];
           vif.slv_cb.b_user <= user_t'(^t.id);  // some non-zero user bits to carry
           valid_q = 1'b1;
         end
@@ -173,37 +214,47 @@ class axi_slave_mem extends uvm_component;
     end
   endtask
 
+  // R channel. act holds the read bursts being returned (at most
+  // cfg.slv_r_active); cur is the one whose beat is on the bus. With one
+  // active burst this is a plain in-order R channel.
   task r_loop();
     axi_seq_item t;
-    data_t       rd;
-    bit          loaded  = 1'b0;
+    axi_seq_item act[$];
+    int unsigned beat_of[$];
+    int unsigned cur     = 0;
     bit          valid_q = 1'b0;
-    int unsigned beat    = 0;
     int unsigned wait_c  = 0;
+    data_t       rd;
+    axi_pkg::resp_t rr;
     forever begin
       @(vif.slv_cb);
       if (valid_q && vif.slv_cb.r_ready === 1'b1) begin
         valid_q = 1'b0;
-        if (beat == t.len) loaded = 1'b0;
-        else begin
-          beat++;
+        if (beat_of[cur] == act[cur].len) begin
+          act.delete(cur);
+          beat_of.delete(cur);
+          cur = 0;
+        end else begin
+          beat_of[cur]++;
           wait_c = axi_tb_cfg::rand_upto(cfg.slv_r_gap_max);
+          if (act.size() > 1) cur = switch_burst(act, cur);
         end
       end
-      if (!loaded && ar_fifo.size() > 0) begin
-        t      = ar_fifo.pop_front();
-        beat   = 0;
-        wait_c = axi_tb_cfg::rand_upto(cfg.slv_r_gap_max);
-        loaded = 1'b1;
+      while (ar_fifo.size() > 0 && act.size() < ((cfg.slv_r_active > 0) ? cfg.slv_r_active : 1)) begin
+        if (act.size() == 0) wait_c = axi_tb_cfg::rand_upto(cfg.slv_r_gap_max);
+        act.push_back(ar_fifo.pop_front());
+        beat_of.push_back(0);
       end
-      if (loaded && !valid_q) begin
+      if (act.size() > 0 && !valid_q) begin
         if (wait_c > 0) wait_c--;
         else begin
-          rd = read_beat(axi_seq_item::calc_beat_addr(t.addr, t.size, t.len, t.burst, beat));
+          t  = act[cur];
+          rr = cfg.resp_for(t.addr);
+          rd = (rr == axi_pkg::RESP_OKAY) ? read_beat(beat_addr(t, beat_of[cur])) : '0;
           vif.slv_cb.r_id   <= t.id;
           vif.slv_cb.r_data <= rd;
-          vif.slv_cb.r_resp <= axi_pkg::RESP_OKAY;
-          vif.slv_cb.r_last <= (beat == t.len);
+          vif.slv_cb.r_resp <= rr;
+          vif.slv_cb.r_last <= (beat_of[cur] == t.len);
           vif.slv_cb.r_user <= user_t'(^rd);    // some non-zero user bits to carry
           valid_q = 1'b1;
         end
@@ -211,4 +262,17 @@ class axi_slave_mem extends uvm_component;
       vif.slv_cb.r_valid <= valid_q;
     end
   endtask
+
+  // After a beat: maybe continue with another active burst. Only the oldest
+  // active burst of each ID may send (same-ID reads stay in order).
+  function int unsigned switch_burst(axi_seq_item act[$], int unsigned cur);
+    int unsigned ok[$];
+    if (cfg.slv_r_ilv_pct == 0 || !axi_tb_cfg::chance(cfg.slv_r_ilv_pct)) return cur;
+    foreach (act[i]) begin
+      bit older_same_id = 1'b0;
+      for (int unsigned j = 0; j < i; j++) if (act[j].id == act[i].id) older_same_id = 1'b1;
+      if (!older_same_id) ok.push_back(i);
+    end
+    return ok[$urandom_range(ok.size() - 1)];
+  endfunction
 endclass

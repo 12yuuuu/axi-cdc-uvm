@@ -4,13 +4,16 @@
 // Functional coverage for the CDC bridge (see docs/vplan.md).
 //
 //   txn    shape of every transaction sent into the DUT (from the source
-//          monitor): kind, burst type, length, beat size, alignment, strobes
+//          monitor): kind, burst type, length, beat size, alignment, strobes,
+//          and the response it got (OKAY / SLVERR / DECERR)
 //   flow   DUT events, checked every clock cycle:
 //            full.X  the FIFO of channel X was full (VALID=1, READY=0 at its
 //                    input: AW/W/AR on the source side, B/R on the dest side)
 //            b2b.X   the DUT gave out channel X on two cycles in a row
 //                    (the FIFO streams at full rate across the CDC)
 //            rw      AW and AR handshakes in the same source cycle
+//            reorder B responses out of AW order; R beats of two IDs
+//                    interleaved (seen at the source port, i.e. after the DUT)
 //   order  AW vs. first W beat of each write, on both sides of the DUT
 //   clk    clock relation of this run: period ratio bucket, and whether the
 //          two clocks ever had a rising edge at the same time
@@ -28,6 +31,7 @@ typedef enum {NO_COINCIDENT_EDGES, COINCIDENT_EDGES} cov_phase_e;
 typedef enum {CH_AW, CH_W, CH_AR, CH_B, CH_R} cov_ch_e;
 typedef enum {SIDE_SRC, SIDE_DST} cov_side_e;
 typedef enum {W_BEFORE_AW, AW_W_SAME_CYCLE, AW_BEFORE_W} cov_order_e;
+typedef enum {OKAY, SLVERR, DECERR} cov_resp_e;
 
 class axi_coverage extends uvm_subscriber #(axi_seq_item);
   `uvm_component_utils(axi_coverage)
@@ -40,11 +44,16 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
   int unsigned n_coincident;      // rising edges of both clocks at the same time
   int unsigned aw_n[2], wf_n[2];  // per side: AW handshakes, first W beats
   bit          in_burst[2];       // per side: inside a W burst
+  id_t         src_aw_ids[$];    // AW IDs at the source port, oldest first
+  bit          r_open[id_t];     // read bursts with beats seen but no last beat
+  id_t         last_r_id;
+  bit          have_last_r;
   cov_ratio_e  ratio_b;          // clock relation of this run (set at the end)
   cov_phase_e  phase_b;
 
   covergroup cg_txn with function sample(axi_kind_e kind, axi_pkg::burst_t burst, cov_len_e len,
-                                         axi_pkg::size_t size, cov_align_e align, cov_strb_e strb);
+                                         axi_pkg::size_t size, cov_align_e align, cov_strb_e strb,
+                                         cov_resp_e resp);
     cp_kind  : coverpoint kind;
     cp_burst : coverpoint burst { bins FIXED = {axi_pkg::BURST_FIXED};
                                   bins INCR  = {axi_pkg::BURST_INCR};
@@ -59,12 +68,15 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
       ignore_bins wrap_bad   = binsof(cp_burst.WRAP)  && binsof(cp_len) intersect {LEN_1, LEN_9_15, LEN_17_255, LEN_256};
     }
     x_ks     : cross cp_kind, cp_size;
+    cp_resp  : coverpoint resp;
+    x_kr     : cross cp_kind, cp_resp;
   endgroup
 
   covergroup cg_flow with function sample(int unsigned what, cov_ch_e ch);
     cp_full : coverpoint ch iff (what == 0);
     cp_b2b  : coverpoint ch iff (what == 1);
     cp_rw   : coverpoint what { bins aw_ar_same_cycle = {2}; }
+    cp_reo  : coverpoint what { bins B_OUT_OF_ORDER = {3}; bins R_INTERLEAVED = {4}; }
   endgroup
 
   covergroup cg_order with function sample(cov_side_e side, cov_order_e ord);
@@ -146,6 +158,7 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
     cov_ch_e    c;
     cov_side_e  sd;
     cov_order_e o;
+    cov_resp_e  rs;
     axi_pkg::burst_t bursts[3] = '{axi_pkg::BURST_FIXED, axi_pkg::BURST_INCR, axi_pkg::BURST_WRAP};
     k = k.first(); do begin goal({"txn.kind.", k.name()}); k = k.next(); end while (k != k.first());
     foreach (bursts[i]) goal({"txn.burst.", burst_name(bursts[i])});
@@ -153,6 +166,7 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
     for (int z = 0; z <= 3; z++) goal({"txn.size.", size_name(z)});
     a = a.first(); do begin goal({"txn.align.", a.name()}); a = a.next(); end while (a != a.first());
     s = s.first(); do begin goal({"txn.strb.", s.name()}); s = s.next(); end while (s != s.first());
+    rs = rs.first(); do begin goal({"txn.resp.", rs.name()}); rs = rs.next(); end while (rs != rs.first());
     k = k.first();
     do begin
       foreach (bursts[i]) begin
@@ -163,12 +177,16 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
         end while (l != l.first());
       end
       for (int z = 0; z <= 3; z++) goal({"txn.x_ks.", k.name(), ".", size_name(z)});
+      rs = rs.first();
+      do begin goal({"txn.x_kr.", k.name(), ".", rs.name()}); rs = rs.next(); end while (rs != rs.first());
       k = k.next();
     end while (k != k.first());
 
     c = c.first();
     do begin goal({"flow.full.", c.name()}); goal({"flow.b2b.", c.name()}); c = c.next(); end while (c != c.first());
     goal("flow.rw.aw_ar_same_cycle");
+    goal("flow.reorder.B_OUT_OF_ORDER");
+    goal("flow.reorder.R_INTERLEAVED");
 
     sd = sd.first();
     do begin
@@ -221,7 +239,8 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
     cov_align_e a = (t.addr % (1 << t.size) == 0) ? ALIGNED : UNALIGNED;
     cov_strb_e  s = (t.kind == AXI_WRITE) ? strb_bin(t) : STRB_FULL;
     string      bn = burst_name(t.burst), sn = size_name(t.size);
-    cg_txn.sample(t.kind, t.burst, l, t.size, a, s);
+    cov_resp_e  r  = resp_bin(t);
+    cg_txn.sample(t.kind, t.burst, l, t.size, a, s, r);
     hit({"txn.kind.", t.kind.name()});
     hit({"txn.burst.", bn});
     hit({"txn.len.", l.name()});
@@ -230,6 +249,20 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
     if (t.kind == AXI_WRITE) hit({"txn.strb.", s.name()});
     hit({"txn.x_kbl.", t.kind.name(), ".", bn, ".", l.name()});
     hit({"txn.x_ks.", t.kind.name(), ".", sn});
+    hit({"txn.resp.", r.name()});
+    hit({"txn.x_kr.", t.kind.name(), ".", r.name()});
+  endfunction
+
+  // Response of a transaction: B, or the first R beat (all beats of a read
+  // get the same response from this slave). EXOKAY cannot occur (no
+  // exclusive accesses) and counts as OKAY.
+  static function cov_resp_e resp_bin(axi_seq_item t);
+    if (t.resp.size() == 0) return OKAY;
+    case (t.resp[0])
+      axi_pkg::RESP_SLVERR: return SLVERR;
+      axi_pkg::RESP_DECERR: return DECERR;
+      default:              return OKAY;
+    endcase
   endfunction
 
   // ------------------------------------------------------ per-cycle events
@@ -287,6 +320,28 @@ class axi_coverage extends uvm_subscriber #(axi_seq_item);
       if (aw_hs && ar_hs) begin
         cg_flow.sample(2, CH_AW);
         hit("flow.rw.aw_ar_same_cycle");
+      end
+      if (aw_hs) src_aw_ids.push_back(src_vif.mon_cb.aw_id);
+      if (b_hs) begin   // a B for anything but the oldest open write is out of order
+        int idx[$] = src_aw_ids.find_first_index(x) with (x == src_vif.mon_cb.b_id);
+        if (idx.size() > 0) begin
+          if (idx[0] > 0) begin
+            cg_flow.sample(3, CH_B);
+            hit("flow.reorder.B_OUT_OF_ORDER");
+          end
+          src_aw_ids.delete(idx[0]);
+        end
+      end
+      if (r_hs) begin   // a beat of another ID while a burst is still open
+        id_t rid = src_vif.mon_cb.r_id;
+        if (have_last_r && last_r_id != rid && r_open.exists(last_r_id)) begin
+          cg_flow.sample(4, CH_R);
+          hit("flow.reorder.R_INTERLEAVED");
+        end
+        if (src_vif.mon_cb.r_last === 1'b1) r_open.delete(rid);
+        else                                r_open[rid] = 1'b1;
+        last_r_id   = rid;
+        have_last_r = 1'b1;
       end
       order_step(SIDE_SRC, aw_hs, w_hs, src_vif.mon_cb.w_last === 1'b1);
       b_q = b_hs;

@@ -43,8 +43,13 @@ class axi_base_test extends uvm_test;
   endtask
 
   // ---- helpers for the derived tests
+  // Derived tests may hand out a derived sequence (see rand_ooo_test).
+  virtual function axi_rand_seq new_seq(string name);
+    return axi_rand_seq::type_id::create(name);
+  endfunction
+
   function axi_rand_seq mk_seq(string name, int kind_sel, addr_t base, int unsigned span, int unsigned n);
-    axi_rand_seq s = axi_rand_seq::type_id::create(name);
+    axi_rand_seq s = new_seq(name);
     s.kind_sel = kind_sel;
     s.base     = base;
     s.span     = span;
@@ -412,3 +417,158 @@ class rand_deep_test extends rand_cov_test;
   function int unsigned hold_gap(); return $urandom_range(200, 20);          endfunction
   function int unsigned hold_len(); return $urandom_range(8 * cap, 2 * cap); endfunction
 endclass
+
+// Out-of-order responses, read interleaving and error responses (AXI A5.3,
+// A3.4.4). The slave returns B responses of different IDs out of order and
+// interleaves the R beats of 2-4 reads with different IDs; the error pages
+// of region E answer SLVERR and DECERR. Every sequence keeps each ID inside
+// its own address slice (axi_rand_part_seq), so the reference model never
+// depends on the order of writes with different IDs. Clocks, knobs and
+// traffic come from the seed, as in rand_cov_test; then region E gets its
+// own writes, reads and a full sweep.
+class rand_ooo_test extends rand_cov_test;
+  `uvm_component_utils(rand_ooo_test)
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void set_knobs();
+    super.set_knobs();
+    cfg.slv_b_ooo_pct = $urandom_range(90, 30);
+    cfg.slv_r_ilv_pct = $urandom_range(90, 30);
+    cfg.slv_r_active  = $urandom_range(4, 2);
+    cfg.slv_b_gather  = $urandom_range(48, 8);
+    cfg.err_en        = 1'b1;
+    `uvm_info("RAND", $sformatf("reorder knobs: B out of order %0d %% (wait up to %0d cycles for a second B), R interleave %0d %% over %0d reads; error pages on",
+                                cfg.slv_b_ooo_pct, cfg.slv_b_gather, cfg.slv_r_ilv_pct, cfg.slv_r_active), UVM_LOW)
+  endfunction
+
+  function axi_rand_seq new_seq(string name);
+    axi_rand_part_seq s = axi_rand_part_seq::type_id::create(name);
+    return s;
+  endfunction
+
+  task run_traffic();
+    axi_rand_seq s;
+    int unsigned n1, n2;
+    super.run_traffic();
+    idle();
+    n1 = n_txn();
+    n2 = n_txn();
+    // Region E always runs with several transactions in flight, so that B
+    // responses can overtake each other in every configuration (with the
+    // seed's knobs, ram_d1 never saw one: Stage 11, first full run).
+    if (cfg.max_outstanding < 8) cfg.max_outstanding = 8;
+    `uvm_info("RAND", $sformatf("region E (error pages): %0d writes, then %0d reads, up to %0d in flight",
+                                n1, n2, cfg.max_outstanding), UVM_LOW)
+    s = shaped("wr_e", 1, REGION_E, n1);
+    s.start(env.mst.sqr);
+    idle();
+    s = shaped("rd_e", 0, REGION_E, n2);
+    s.start(env.mst.sqr);
+    idle();
+    sweep(REGION_E, 16384);
+  endtask
+endclass
+
+// Checks the two address models against hand-computed vectors from the AXI
+// spec rules (A3.4.1, A3.4.3), then against each other on random legal
+// bursts, then runs the smoke traffic:
+//   axi_seq_item::calc_beat_addr / beat_lanes  closed form; slave + stimulus
+//   axi_ref_model::beats                       spec pseudo-code; scoreboard
+// tools/axi_addr_model.py checks the same vectors with a third model.
+class addr_model_test extends smoke_test;
+  `uvm_component_utils(addr_model_test)
+  int unsigned n_vec, n_rand, n_bad;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void check_vec(string what, axi_pkg::burst_t bt, int unsigned sz, int unsigned ln, addr_t start,
+                      addr_t ea[$], int unsigned elo[$], int unsigned ehi[$]);
+    addr_t       a[];
+    int unsigned lo[], hi[], clo, chi;
+    axi_seq_item t = axi_seq_item::type_id::create("t");
+    t.addr = start; t.size = sz; t.len = ln; t.burst = bt;
+    axi_ref_model::beats(start, sz, ln, bt, a, lo, hi);
+    n_vec++;
+    if (a.size() != ea.size() || ea.size() != ln + 1) begin
+      n_bad++;
+      `uvm_error("ADDR_VEC", $sformatf("%s: %0d beats from the spec model, %0d in the vector", what, a.size(), ea.size()))
+      return;
+    end
+    foreach (ea[i]) begin
+      t.beat_lanes(i, clo, chi);
+      if (a[i] != ea[i] || lo[i] != elo[i] || hi[i] != ehi[i] ||
+          axi_seq_item::calc_beat_addr(start, sz, ln, bt, i) != ea[i] || clo != elo[i] || chi != ehi[i]) begin
+        n_bad++;
+        `uvm_error("ADDR_VEC", $sformatf("%s beat %0d: expected %h lanes %0d..%0d; spec model %h %0d..%0d; closed form %h %0d..%0d",
+                   what, i, ea[i], elo[i], ehi[i], a[i], lo[i], hi[i],
+                   axi_seq_item::calc_beat_addr(start, sz, ln, bt, i), clo, chi))
+      end
+    end
+  endfunction
+
+  function void hand_vectors();
+    addr_t       a256[$];
+    int unsigned l256[$];
+    // INCR
+    check_vec("INCR 8B x4",            axi_pkg::BURST_INCR,  3, 3,  'h1000, '{'h1000, 'h1008, 'h1010, 'h1018}, '{0, 0, 0, 0}, '{7, 7, 7, 7});
+    check_vec("INCR 4B x3 unaligned",  axi_pkg::BURST_INCR,  2, 2,  'h1003, '{'h1003, 'h1004, 'h1008}, '{3, 4, 0}, '{3, 7, 3});
+    check_vec("INCR 8B x2 unaligned",  axi_pkg::BURST_INCR,  3, 1,  'h2005, '{'h2005, 'h2008}, '{5, 0}, '{7, 7});
+    check_vec("INCR 4B x2 unaligned",  axi_pkg::BURST_INCR,  2, 1,  'hd006, '{'hd006, 'hd008}, '{6, 0}, '{7, 3});
+    check_vec("INCR 2B x4 narrow",     axi_pkg::BURST_INCR,  1, 3,  'h3006, '{'h3006, 'h3008, 'h300a, 'h300c}, '{6, 0, 2, 4}, '{7, 1, 3, 5});
+    check_vec("INCR 1B x3",            axi_pkg::BURST_INCR,  0, 2,  'h4007, '{'h4007, 'h4008, 'h4009}, '{7, 0, 1}, '{7, 0, 1});
+    check_vec("INCR 8B x1 unaligned",  axi_pkg::BURST_INCR,  3, 0,  'hb00d, '{'hb00d}, '{5}, '{7});
+    for (int unsigned i = 0; i < 256; i++) begin a256.push_back('ha000 + i); l256.push_back(i % 8); end
+    check_vec("INCR 1B x256",          axi_pkg::BURST_INCR,  0, 255, 'ha000, a256, l256, l256);
+    // FIXED
+    check_vec("FIXED 4B x4",           axi_pkg::BURST_FIXED, 2, 3,  'h5010, '{'h5010, 'h5010, 'h5010, 'h5010}, '{0, 0, 0, 0}, '{3, 3, 3, 3});
+    check_vec("FIXED 4B x2 unaligned", axi_pkg::BURST_FIXED, 2, 1,  'h5011, '{'h5011, 'h5011}, '{1, 1}, '{3, 3});
+    // WRAP
+    check_vec("WRAP 4B x4 from middle",  axi_pkg::BURST_WRAP, 2, 3, 'h6008, '{'h6008, 'h600c, 'h6000, 'h6004}, '{0, 4, 0, 4}, '{3, 7, 3, 7});
+    check_vec("WRAP 8B x8 from 0x30",    axi_pkg::BURST_WRAP, 3, 7, 'h7030,
+          '{'h7030, 'h7038, 'h7000, 'h7008, 'h7010, 'h7018, 'h7020, 'h7028}, '{0, 0, 0, 0, 0, 0, 0, 0}, '{7, 7, 7, 7, 7, 7, 7, 7});
+    check_vec("WRAP 1B x2",              axi_pkg::BURST_WRAP, 0, 1, 'h8001, '{'h8001, 'h8000}, '{1, 0}, '{1, 0});
+    check_vec("WRAP 2B x16 from 0x16",   axi_pkg::BURST_WRAP, 1, 15, 'h9016,
+          '{'h9016, 'h9018, 'h901a, 'h901c, 'h901e, 'h9000, 'h9002, 'h9004,
+            'h9006, 'h9008, 'h900a, 'h900c, 'h900e, 'h9010, 'h9012, 'h9014},
+          '{6, 0, 2, 4, 6, 0, 2, 4, 6, 0, 2, 4, 6, 0, 2, 4}, '{7, 1, 3, 5, 7, 1, 3, 5, 7, 1, 3, 5, 7, 1, 3, 5});
+    check_vec("WRAP 8B x4 at boundary",  axi_pkg::BURST_WRAP, 3, 3, 'hc000, '{'hc000, 'hc008, 'hc010, 'hc018}, '{0, 0, 0, 0}, '{7, 7, 7, 7});
+  endfunction
+
+  // Random legal bursts: both models must agree on every beat.
+  function void cross_check(int unsigned n);
+    addr_t       a[];
+    int unsigned lo[], hi[], clo, chi;
+    axi_seq_item t = axi_seq_item::type_id::create("t");
+    t.any_burst = 1'b1;
+    t.any_size  = 1'b1;
+    t.long_ok   = 1'b1;
+    t.max_len   = 255;
+    repeat (n) begin
+      if (!t.randomize())
+        `uvm_fatal("RAND", "addr_model_test: randomize() failed")
+      axi_ref_model::beats(t.addr, t.size, t.len, t.burst, a, lo, hi);
+      n_rand++;
+      foreach (a[i]) begin
+        t.beat_lanes(i, clo, chi);
+        if (a[i] != axi_seq_item::calc_beat_addr(t.addr, t.size, t.len, t.burst, i) || lo[i] != clo || hi[i] != chi) begin
+          n_bad++;
+          `uvm_error("ADDR_RAND", $sformatf("models differ, beat %0d of %s", i, t.convert2string()))
+          break;
+        end
+      end
+    end
+  endfunction
+
+  task run_traffic();
+    hand_vectors();
+    cross_check(20000);
+    `uvm_info("ADDR", $sformatf("%0d hand-computed bursts and %0d random bursts checked, %0d mismatches", n_vec, n_rand, n_bad), UVM_NONE)
+    super.run_traffic();
+  endtask
+endclass
+

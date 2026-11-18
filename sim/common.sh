@@ -60,7 +60,7 @@ verdict () {
 # Regression helpers (Stage 8 on). The calling script sets RUN (build dirs),
 # LOG (log dir), CSV (summary file) and COVOPT (coverage options, may be
 # empty), then calls run_case for every run.
-CSV_HEADER="name,set,test,seed,use_ram,log_depth,src_ns,dst_ns,phase_ns,result,writes_ok,reads_ok,beats_ok,bad,src_stall_aw,src_stall_w,src_stall_ar,dst_stall_b,dst_stall_r,hold_pulses,outstanding,coincident_edges,cov_hit,cov_all,sva_errors,sim_end_us"
+CSV_HEADER="name,set,test,seed,use_ram,log_depth,src_ns,dst_ns,phase_ns,result,writes_ok,reads_ok,beats_ok,wbeats_ok,resp_err_ok,bad,src_stall_aw,src_stall_w,src_stall_ar,dst_stall_b,dst_stall_r,hold_pulses,outstanding,coincident_edges,cov_hit,cov_all,sva_errors,sim_end_us"
 n_pass=0; n_fail=0; failed=""
 
 # run_case <set> <name> <test> <USE_RAM> <LOG_DEPTH> <seed> [plusargs]
@@ -73,7 +73,7 @@ run_case () {
   local v; v=$(verdict "$L" pass)
   local clk sb src dst hp endt out cv sva
   clk=$(grep -m1 '\[TB\]' "$L" | sed -nE 's/.*src period ([0-9.]+) ns, dst period ([0-9.]+) ns, dst phase ([0-9.]+) ns.*/\1 \2 \3/p')
-  sb=$(grep -m1 '\[SB\] bridge check' "$L" | sed -nE 's/.*writes ([0-9]+) ok \/ ([0-9]+) bad, reads ([0-9]+) ok \/ ([0-9]+) bad; data check: ([0-9]+) beats ok \/ ([0-9]+) bad.*/\1 \2 \3 \4 \5 \6/p')
+  sb=$(grep -m1 '\[SB\] bridge check' "$L" | sed -nE 's/.*writes ([0-9]+) ok \/ ([0-9]+) bad, reads ([0-9]+) ok \/ ([0-9]+) bad; data check: ([0-9]+) beats ok \/ ([0-9]+) bad; write beats ([0-9]+); error responses ([0-9]+) ok \/ ([0-9]+) bad.*/\1 \2 \3 \4 \5 \6 \7 \8 \9/p')
   src=$(grep -m1 'env.mst.mon \[MON\]' "$L" | sed -nE 's/.*AW ([0-9]+), W ([0-9]+), B ([0-9]+), AR ([0-9]+), R ([0-9]+).*/\1 \2 \3 \4 \5/p')
   dst=$(grep -m1 'env.slv_mon \[MON\]' "$L" | sed -nE 's/.*AW ([0-9]+), W ([0-9]+), B ([0-9]+), AR ([0-9]+), R ([0-9]+).*/\1 \2 \3 \4 \5/p')
   hp=$(grep -m1 'hold pulses' "$L" | sed -nE 's/.*\] ([0-9]+) hold pulses.*/\1/p')
@@ -84,13 +84,15 @@ run_case () {
   sva=$(grep -c 'UVM_ERROR .*\[SVA_' "$L")
   endt=$(grep -m1 'TEST \(PASSED\|FAILED\)' "$L" | sed -nE 's/.*@ ([0-9]+):.*/\1/p')
   set -- $clk;  local sn=${1:-?} dn=${2:-?} pn=${3:-?}
-  set -- $sb;   local wok=${1:-?} wbad=${2:-?} rok=${3:-?} rbad=${4:-?} bok=${5:-?} bbad=${6:-?}
+  set -- $sb;   local wok=${1:-?} wbad=${2:-?} rok=${3:-?} rbad=${4:-?} bok=${5:-?} bbad=${6:-?} wbk=${7:-?} eok=${8:-?} ebad=${9:-?}
   set -- $src;  local saw=${1:-?} sw=${2:-?} sar=${4:-?}
   set -- $dst;  local db=${3:-?} dr=${5:-?}
   set -- $cv;   local ch=${1:-?} ca=${2:-?} co=${3:-?}
   local bad="?"
-  if [[ "$wbad" =~ ^[0-9]+$ && "$rbad" =~ ^[0-9]+$ && "$bbad" =~ ^[0-9]+$ ]]; then bad=$(( wbad + rbad + bbad )); fi
-  echo "$name,$set,$test,$seed,$ram,$depth,$sn,$dn,$pn,$v,$wok,$rok,$bok,$bad,$saw,$sw,$sar,$db,$dr,${hp:--},${out:--},$co,$ch,$ca,$sva,$(( ${endt:-0} / 1000000 ))" >> "$CSV"
+  if [[ "$wbad" =~ ^[0-9]+$ && "$rbad" =~ ^[0-9]+$ && "$bbad" =~ ^[0-9]+$ && "$ebad" =~ ^[0-9]+$ ]]; then
+    bad=$(( wbad + rbad + bbad + ebad ))
+  fi
+  echo "$name,$set,$test,$seed,$ram,$depth,$sn,$dn,$pn,$v,$wok,$rok,$bok,$wbk,$eok,$bad,$saw,$sw,$sar,$db,$dr,${hp:--},${out:--},$co,$ch,$ca,$sva,$(( ${endt:-0} / 1000000 ))" >> "$CSV"
   printf "  %-4s %-24s src %6s dst %6s ns  wr %4s rd %4s bad %-2s sva %-2s cov %3s/%-3s full %s/%s/%s/%s/%s\n" \
     "$v" "$name" "$sn" "$dn" "$wok" "$rok" "$bad" "$sva" "$ch" "$ca" "$saw" "$sw" "$sar" "$db" "$dr"
   if [ "$v" = PASS ]; then n_pass=$((n_pass + 1))

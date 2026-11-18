@@ -1,0 +1,31 @@
+# Copyright 2026 Kuan-Yu Liu
+# SPDX-License-Identifier: Apache-2.0
+#
+# Checks that need no commercial simulator. The full regression runs on
+# Xcelium (sim/regress.sh); its results are in docs/results.md.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install slang
+        run: pip install pyslang==12.1.0
+      - name: Get the Accellera UVM library
+        run: git clone --depth 1 --branch 2020.3.1 https://github.com/accellera-official/uvm-core.git "$RUNNER_TEMP/uvm-core"
+      - name: Compile RTL + UVM testbench + SVA with slang
+        run: python3 tools/lint_tb.py --uvm "$RUNNER_TEMP/uvm-core/src"
+      - name: Sign-off rules (incomplete results must not sign off)
+        run: python3 tools/test_report.py
+      - name: Address model against hand-computed AXI vectors
+        run: python3 tools/axi_addr_model.py
+      - name: Shell scripts parse
+        run: for f in sim/*.sh; do bash -n "$f"; done

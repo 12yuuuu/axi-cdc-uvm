@@ -14,6 +14,8 @@
 //                              with rising edges of both clocks at the same time
 //           +INJECT_RDATA_ERR  flip bit 0 of R data on the DUT's source-side
 //                              output (negative test: the scoreboard must fail)
+//           +INJECT_BRESP_ERR  turn every OKAY on the DUT's source-side B output
+//                              into SLVERR (negative test: the response check)
 //           +INJECT_PTR_GLITCH axi_cdc_ram only: flip two bits of the R FIFO's
 //                              gray read pointer for one cycle (negative test:
 //                              the CDC assertions must fail)
@@ -58,11 +60,16 @@ module tb_top;
   `AXI_ASSIGN_TO_REQ(src_req, src_if)
   `AXI_ASSIGN_TO_RESP(dst_resp, dst_if)
   // DUT outputs -> interface (procedural, see axi_vif.sv)
-  bit inj_rdata_err = 1'b0;
-  initial if ($test$plusargs("INJECT_RDATA_ERR")) inj_rdata_err = 1'b1;
+  bit inj_rdata_err = 1'b0, inj_bresp_err = 1'b0;
+  initial begin
+    if ($test$plusargs("INJECT_RDATA_ERR")) inj_rdata_err = 1'b1;
+    if ($test$plusargs("INJECT_BRESP_ERR")) inj_bresp_err = 1'b1;
+  end
   always @* begin
     `AXI_SET_FROM_RESP(src_if, src_resp)
     if (inj_rdata_err) src_if.r_data = src_resp.r.data ^ data_t'(1);  // fake DUT bug
+    if (inj_bresp_err && src_resp.b.resp == axi_pkg::RESP_OKAY)
+      src_if.b_resp = axi_pkg::RESP_SLVERR;                           // fake DUT bug
   end
   always @* begin
     `AXI_SET_FROM_REQ(dst_if, dst_req)
