@@ -44,7 +44,10 @@ ratios, coincident edges), and the plan is built around them.
 
 ## Verification environment
 
-![Fig. 1](docs/fig1_testbench.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/fig1_testbench_dark.svg">
+  <img src="docs/fig1_testbench.svg" width="830" alt="Fig. 1: testbench">
+</picture>
 
 *Fig. 1. Testbench. Handshake assertions sit on both ports; CDC assertions
 are bound inside the DUT.*
@@ -59,7 +62,10 @@ are bound inside the DUT.*
 | Coverage | 5 covergroups, 146 bins: transaction shape and response, FIFO events, AW/W order, clock relation, FIFO full x clock relation |
 | Stimulus | 10 tests: directed, clock sweep, constrained random, out-of-order and error traffic, targeted random for deep FIFOs |
 
-![Fig. 2](docs/fig2_waveform.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/fig2_waveform_dark.svg">
+  <img src="docs/fig2_waveform.svg" width="830" alt="Fig. 2: one write crossing the bridge">
+</picture>
 
 *Fig. 2. A 4-beat write crossing from a 10 ns to a 3 ns clock. Dots mark
 handshakes. B reaches the source port on the third `src_clk` edge after the
@@ -85,7 +91,10 @@ the main checks are kept separate:
 
 ## Coverage closure
 
-![Fig. 3](docs/fig3_coverage_closure.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/fig3_coverage_closure_dark.svg">
+  <img src="docs/fig3_coverage_closure.svg" width="830" alt="Fig. 3: coverage closure">
+</picture>
 
 *Fig. 3. Closure of the first 135 bins. Merged random runs reached 95%, but
 with `LogDepth` 4 and 6 the AW, AR and B FIFOs were never full. More

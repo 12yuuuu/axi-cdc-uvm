@@ -3,13 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Figures for the README, in one paper-like style (muted palette, serif text).
 
-    python3 tools/figures.py arch     docs/fig1_testbench.svg
-    python3 tools/figures.py wave     docs/fig2_waveform.svg waves.vcd 340 445
-    python3 tools/figures.py coverage docs/fig3_coverage.svg docs/data/coverage_closure.csv
+    python3 tools/figures.py [--dark] arch     docs/fig1_testbench.svg
+    python3 tools/figures.py [--dark] wave     docs/fig2_waveform.svg waves.vcd 340 445
+    python3 tools/figures.py [--dark] coverage docs/fig3_coverage_closure.svg docs/data/coverage_closure.csv
 
 wave: a VCD of tb_top, e.g. from `sim/run_one.sh smoke_test 1 1 2 +VCD`, and a
 time window in ns around one write.
-The output format follows the file extension (.svg, .pdf, .png).
+The background is transparent. --dark draws light ink for a dark page (the
+README picks the version with prefers-color-scheme); the default is for a
+white page. The output format follows the file extension (.svg, .pdf, .png).
 """
 import csv
 import sys
@@ -22,28 +24,46 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 # Muted palette. The pair passes the dataviz palette checks on white
 # (lightness band, chroma floor, CVD and normal-vision separation, 3:1
 # contrast); the stage ramp passes the ordinal checks.
-INK, INK2, GRID, SURF = "#222222", "#5a5a5a", "#e3e3e3", "#ffffff"
+# SURF is the page the figure sits on (the files themselves are transparent):
+# box fills, washes and marker rings are drawn in it.
+THEMES = {
+    "light": dict(INK="#222222", INK2="#5a5a5a", GRID="#e3e3e3", SURF="#ffffff", DUT="#f3f3f3", RULE="#c9c9c9",
+                  STAGE=["#A39DD2", "#6E64B0", "#3B2F8C"]),     # closure steps, light -> dark
+    # GitHub dark page; same hues, the stage ramp runs dim -> bright (passes
+    # the ordinal checks on #0d1117; SRC/DST pass the categorical checks)
+    "dark": dict(INK="#e6edf3", INK2="#9198a1", GRID="#2d333b", SURF="#0d1117", DUT="#161b22", RULE="#444c56",
+                 STAGE=["#5A4FA8", "#8C84CC", "#C3BEEA"]),
+}
 SRC, DST = "#6E64B0", "#CC6677"               # source / destination clock domain
-STAGE = ["#A39DD2", "#6E64B0", "#3B2F8C"]      # coverage-closure steps, light -> dark
+INK = INK2 = GRID = SURF = DUT = RULE = None
+STAGE = []
 MONO = "DejaVu Sans Mono"
 # no date or tool version in the files, so a rebuild without changes is byte-identical
 META = {"svg": {"Date": None, "Creator": None}, "pdf": {"CreationDate": None, "Creator": None, "Producer": None}}
 
-plt.rcParams.update({
-    "font.family": "STIXGeneral", "mathtext.fontset": "stix", "font.size": 9,
-    "axes.linewidth": 0.6, "axes.edgecolor": INK2, "svg.fonttype": "path",
-    "xtick.major.width": 0.6, "ytick.major.width": 0.6, "xtick.color": INK2,
-    "ytick.color": INK2, "axes.labelcolor": INK, "text.color": INK, "savefig.dpi": 220,
-    "svg.hashsalt": "axi_cdc_uvm",
-})
+
+
+def use_theme(name):
+    globals().update(THEMES[name])
+    plt.rcParams.update({
+        "font.family": "STIXGeneral", "mathtext.fontset": "stix", "font.size": 9,
+        "axes.linewidth": 0.6, "axes.edgecolor": INK2, "svg.fonttype": "path",
+        "xtick.major.width": 0.6, "ytick.major.width": 0.6, "xtick.color": INK2,
+        "ytick.color": INK2, "axes.labelcolor": INK, "text.color": INK, "savefig.dpi": 220,
+        "svg.hashsalt": "axi_cdc_uvm",
+    })
 
 
 def tint(hex_color, a):
-    """Blend a color with white (a = share of the color)."""
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    mix = lambda c: round(255 - (255 - c) * a)
-    return "#%02x%02x%02x" % (mix(r), mix(g), mix(b))
+    """Blend a color with the page (a = share of the color)."""
+    h, p = hex_color.lstrip("#"), SURF.lstrip("#")
+    rgb = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+    page = [int(p[i:i + 2], 16) for i in (0, 2, 4)]
+    return "#%02x%02x%02x" % tuple(round(q + (c - q) * a) for c, q in zip(rgb, page))
+
+
+def save(fig, out):
+    fig.savefig(out, transparent=True, metadata=META.get(out.rsplit(".", 1)[-1]))
 
 
 # ----------------------------------------------------------------- figure 1
@@ -98,7 +118,7 @@ def arch(out):
 
     # DUT
     ax.add_patch(FancyBboxPatch((38, 16.5), 24, 28, boxstyle="round,pad=0,rounding_size=1.2",
-                                fc="#f3f3f3", ec=INK, lw=0.9, zorder=1))
+                                fc=DUT, ec=INK, lw=0.9, zorder=1))
     ax.text(50, 42.0, "axi_cdc_ram", ha="center", va="center", fontsize=8.5, family=MONO, zorder=3)
     ax.text(50, 39.6, "DUT (baseline: axi_cdc)", ha="center", va="center", fontsize=6.8, color=INK2, zorder=3)
     ax.plot([50, 50], [20.5, 37.5], color=INK2, lw=0.6, ls=(0, (3, 2)), zorder=2)
@@ -136,7 +156,7 @@ def arch(out):
     arrow((25, 5), (64, -3.5))
     arrow((82.5, 5), (82.5, -3.5))
     fig.subplots_adjust(0.005, 0.005, 0.995, 0.995)
-    fig.savefig(out, facecolor=SURF, metadata=META.get(out.rsplit(".", 1)[-1]))
+    save(fig, out)
 
 
 # ----------------------------------------------------------------- figure 2
@@ -250,7 +270,7 @@ def wave(out, vcd_path, t0, t1):
     ax.text(t1 - 30.3, yt[-1] - 1.05, "handshake    - - -  payload not valid", va="center", fontsize=7.5, color=INK2)
     ax.set_ylim(yt[-1] - 1.4, yt[0] + 1.35)
     fig.subplots_adjust(left=0.10, right=0.99, top=0.99, bottom=0.10)
-    fig.savefig(out, facecolor=SURF, metadata=META.get(out.rsplit(".", 1)[-1]))
+    save(fig, out)
 
 
 # ----------------------------------------------------------------- figure 3
@@ -264,7 +284,7 @@ def coverage(out, csv_path):
     lo = min(int(r[s]) for r in rows for s in steps)
     for y, r in zip(ys, rows):
         vals = [int(r[s]) for s in steps]
-        ax.plot([min(vals), max(vals)], [y, y], color="#c9c9c9", lw=1.0, zorder=1)
+        ax.plot([min(vals), max(vals)], [y, y], color=RULE, lw=1.0, zorder=1)
         for v, c in zip(vals, STAGE):
             ax.plot([v], [y], "o", ms=6.5, color=c, mec=SURF, mew=1.2, zorder=3)
         ax.text(vals[0] - 0.9, y, str(vals[0]), ha="right", va="center", fontsize=8, color=INK2)
@@ -293,16 +313,18 @@ def coverage(out, csv_path):
     ax.legend(handles, steps, loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=3, frameon=False,
               fontsize=8, handletextpad=0.3, columnspacing=1.6, borderaxespad=0)
     fig.subplots_adjust(left=0.15, right=0.98, top=0.86, bottom=0.19)
-    fig.savefig(out, facecolor=SURF, metadata=META.get(out.rsplit(".", 1)[-1]))
+    save(fig, out)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3 or sys.argv[1] not in ("arch", "wave", "coverage"):
+    args = [a for a in sys.argv[1:] if a != "--dark"]
+    use_theme("dark" if "--dark" in sys.argv[1:] else "light")
+    if len(args) < 2 or args[0] not in ("arch", "wave", "coverage"):
         sys.exit(__doc__)
-    kind, out = sys.argv[1], sys.argv[2]
+    kind, out = args[0], args[1]
     if kind == "arch":
         arch(out)
     elif kind == "wave":
-        wave(out, sys.argv[3], float(sys.argv[4]), float(sys.argv[5]))
+        wave(out, args[2], float(args[3]), float(args[4]))
     else:
-        coverage(out, sys.argv[3])
+        coverage(out, args[2])
